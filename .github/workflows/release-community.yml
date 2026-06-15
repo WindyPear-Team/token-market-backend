@@ -70,15 +70,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: yarn
-          cache-dependency-path: web/yarn.lock
 
       - name: Build shared web
         working-directory: web
         run: |
           corepack enable
-          yarn install --immutable
-          yarn build
+          corepack yarn install --immutable
+          corepack yarn build
 
       - name: Build community binary
         working-directory: community
