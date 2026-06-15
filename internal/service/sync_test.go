@@ -1,0 +1,259 @@
+package service
+
+import (
+	"math"
+	"testing"
+
+	"github.com/WindyPear-Team/flai/internal/model"
+	"github.com/shopspring/decimal"
+)
+
+func TestParseUpstreamPriceItemsSplitRatios(t *testing.T) {
+	body := []byte(`{
+		"success": true,
+		"data": {
+			"model_ratio": {
+				"gpt-4o": 2.5,
+				"deepseek-chat": "0.7"
+			},
+			"completion_ratio": {
+				"gpt-4o": 3,
+				"deepseek-chat": "1"
+			}
+		}
+	}`)
+
+	items, err := parseUpstreamPriceItems(body)
+	if err != nil {
+		t.Fatalf("parseUpstreamPriceItems returned error: %v", err)
+	}
+
+	prices := pricesByModel(items)
+	assertPrice(t, prices, "gpt-4o", "2.5", "7.5")
+	assertPrice(t, prices, "deepseek-chat", "0.7", "0.7")
+}
+
+func TestParseUpstreamPriceItemsModelPriceObjects(t *testing.T) {
+	body := []byte(`{
+		"data": {
+			"model_prices": {
+				"gpt-4o": {
+					"model_ratio": 2,
+					"completion_ratio": 4,
+					"cache_ratio": 1
+				},
+				"claude-3-5-sonnet": {
+					"input_price": "0.003",
+					"output_price": "0.015",
+					"cached_input_price": "0.0015"
+				}
+			}
+		}
+	}`)
+
+	items, err := parseUpstreamPriceItems(body)
+	if err != nil {
+		t.Fatalf("parseUpstreamPriceItems returned error: %v", err)
+	}
+
+	prices := pricesByModel(items)
+	assertPrice(t, prices, "gpt-4o", "2", "8")
+	assertCachedPrice(t, prices, "gpt-4o", "1")
+	assertPrice(t, prices, "claude-3-5-sonnet", "0.003", "0.015")
+	assertCachedPrice(t, prices, "claude-3-5-sonnet", "0.0015")
+}
+
+func TestParseUpstreamPriceItemsSplitCachedPrices(t *testing.T) {
+	body := []byte(`{
+		"success": true,
+		"data": {
+			"input_price": { "gpt-4o": 2.5 },
+			"output_price": { "gpt-4o": 10 },
+			"cached_input_price": { "gpt-4o": 1.25 }
+		}
+	}`)
+
+	items, err := parseUpstreamPriceItems(body)
+	if err != nil {
+		t.Fatalf("parseUpstreamPriceItems returned error: %v", err)
+	}
+
+	prices := pricesByModel(items)
+	assertPrice(t, prices, "gpt-4o", "2.5", "10")
+	assertCachedPrice(t, prices, "gpt-4o", "1.25")
+}
+
+func TestParseUpstreamPriceItemsNewAPITieredExpression(t *testing.T) {
+	body := []byte(`{
+		"success": true,
+		"data": [
+			{
+				"model_name": "gpt-5.5",
+				"model_ratio": 37.5,
+				"completion_ratio": 6,
+				"billing_mode": "tiered_expr",
+				"billing_expr": "p <= 272000 ? tier(\"base\", p * 5 + c * 30 + cr * 0.5) : tier(\"long_context\", p * 10 + c * 45 + cr * 1)"
+			}
+		]
+	}`)
+
+	items, err := parseUpstreamPriceItems(body)
+	if err != nil {
+		t.Fatalf("parseUpstreamPriceItems returned error: %v", err)
+	}
+
+	prices := pricesByModel(items)
+	assertPrice(t, prices, "gpt-5.5", "5", "30")
+	assertCachedPrice(t, prices, "gpt-5.5", "0.5")
+	assertTier(t, prices["gpt-5.5"].InputPriceTiers, 272000, "10")
+	assertTier(t, prices["gpt-5.5"].OutputPriceTiers, 272000, "45")
+	assertTier(t, prices["gpt-5.5"].CachedInputPriceTiers, 272000, "1")
+}
+
+func TestUpstreamURLForPathAvoidsDuplicateV1(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		path    string
+		want    string
+	}{
+		{
+			name:    "newapi pricing uses root when base ends with v1",
+			baseURL: "https://example.com/v1",
+			path:    "/api/pricing",
+			want:    "https://example.com/api/pricing",
+		},
+		{
+			name:    "openai models keeps single v1 when base ends with v1",
+			baseURL: "https://example.com/v1",
+			path:    "/v1/models",
+			want:    "https://example.com/v1/models",
+		},
+		{
+			name:    "root base appends openai v1 path",
+			baseURL: "https://example.com",
+			path:    "/v1/models",
+			want:    "https://example.com/v1/models",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := upstreamURLForPath(test.baseURL, test.path)
+			if got != test.want {
+				t.Fatalf("upstreamURLForPath() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCalculateCostUsesPerMillionPrices(t *testing.T) {
+	got := CalculateCost(1000, 2000, 2.5, 7.5, 1, 1)
+	want := 0.0175
+	if math.Abs(got-want) > 0.000000001 {
+		t.Fatalf("CalculateCost() = %v, want %v", got, want)
+	}
+}
+
+func TestCalculateTieredTokenCost(t *testing.T) {
+	got := CalculateTieredTokenCost(1500, decimal.NewFromInt(10), model.PriceTierList{{
+		MinTokens: 1000,
+		Price:     decimal.NewFromInt(5),
+	}})
+	want := decimal.RequireFromString("0.0125")
+	if !got.Equal(want) {
+		t.Fatalf("CalculateTieredTokenCost() = %s, want %s", got.String(), want.String())
+	}
+}
+
+func TestCalculateTieredTokenCostWithFullInputCondition(t *testing.T) {
+	got := CalculateTieredTokenCostWithMetrics(1000, decimal.NewFromInt(10), model.PriceTierList{{
+		MinTokens: 2000,
+		Price:     decimal.NewFromInt(20),
+		Condition: model.PriceTierConditionFullInputTokens,
+	}}, PriceTierMetrics{
+		FullInputTokens:      3000,
+		BillableInputTokens:  1000,
+		BillableOutputTokens: 50,
+	})
+	want := decimal.RequireFromString("0.02")
+	if !got.Equal(want) {
+		t.Fatalf("CalculateTieredTokenCostWithMetrics() = %s, want %s", got.String(), want.String())
+	}
+}
+
+func TestCalculateModelUsageCostSplitsCacheAndAudio(t *testing.T) {
+	got := calculateModelUsageCost(usageTokenCounts{
+		InputTokens:             100,
+		OutputTokens:            50,
+		CachedInputTokens:       20,
+		CacheReadInputTokens:    20,
+		CacheWriteInputTokens:   10,
+		CacheWrite1hInputTokens: 5,
+		AudioOutputTokens:       10,
+	}, model.Model{
+		InputPrice:             decimal.NewFromInt(10),
+		OutputPrice:            decimal.NewFromInt(20),
+		CachedInputPrice:       decimal.NewFromInt(1),
+		CacheWriteInputPrice:   decimal.NewFromInt(2),
+		CacheWrite1hInputPrice: decimal.NewFromInt(3),
+		AudioOutputPrice:       decimal.NewFromInt(100),
+	})
+	want := decimal.RequireFromString("0.002505")
+	if !got.Equal(want) {
+		t.Fatalf("calculateModelUsageCost() = %s, want %s", got.String(), want.String())
+	}
+}
+
+func pricesByModel(items []upstreamModelPrice) map[string]upstreamModelPrice {
+	prices := make(map[string]upstreamModelPrice, len(items))
+	for _, item := range items {
+		prices[item.Model] = item
+	}
+	return prices
+}
+
+func assertPrice(t *testing.T, prices map[string]upstreamModelPrice, modelName string, inputPrice string, outputPrice string) {
+	t.Helper()
+
+	item, ok := prices[modelName]
+	if !ok {
+		t.Fatalf("missing model %s in parsed prices", modelName)
+	}
+	assertDecimalString(t, item.InputPrice, inputPrice)
+	assertDecimalString(t, item.OutputPrice, outputPrice)
+}
+
+func assertCachedPrice(t *testing.T, prices map[string]upstreamModelPrice, modelName string, cachedInputPrice string) {
+	t.Helper()
+
+	item, ok := prices[modelName]
+	if !ok {
+		t.Fatalf("missing model %s in parsed prices", modelName)
+	}
+	assertDecimalString(t, item.CachedInputPrice, cachedInputPrice)
+}
+
+func assertTier(t *testing.T, tiers model.PriceTierList, minTokens int, price string) {
+	t.Helper()
+
+	if len(tiers) != 1 {
+		t.Fatalf("tier count mismatch: got %d, want 1", len(tiers))
+	}
+	if tiers[0].MinTokens != minTokens {
+		t.Fatalf("tier min tokens mismatch: got %d, want %d", tiers[0].MinTokens, minTokens)
+	}
+	assertDecimalString(t, tiers[0].Price, price)
+}
+
+func assertDecimalString(t *testing.T, got decimal.Decimal, want string) {
+	t.Helper()
+
+	expected, err := decimal.NewFromString(want)
+	if err != nil {
+		t.Fatalf("invalid expected decimal %q: %v", want, err)
+	}
+	if !got.Equal(expected) {
+		t.Fatalf("decimal mismatch: got %s, want %s", got.String(), expected.String())
+	}
+}

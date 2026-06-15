@@ -1,0 +1,2417 @@
+package service
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/WindyPear-Team/flai/internal/model"
+	"github.com/gin-gonic/gin"
+	"github.com/shopspring/decimal"
+	"gorm.io/gorm"
+)
+
+type ProxyService struct {
+	routingMu       sync.Mutex
+	routingCounters map[string]uint64
+}
+
+const maxBufferedStreamBytes = 4 << 20
+
+func NewProxyService() *ProxyService {
+	return &ProxyService{routingCounters: map[string]uint64{}}
+}
+
+type modelListResponse struct {
+	Object string              `json:"object"`
+	Data   []modelListDataItem `json:"data"`
+}
+
+type modelListDataItem struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Created int64  `json:"created"`
+	OwnedBy string `json:"owned_by"`
+}
+
+type proxyProtocol string
+
+const (
+	protocolOpenAI    proxyProtocol = "openai"
+	protocolResponses proxyProtocol = "responses"
+	protocolClaude    proxyProtocol = "claude"
+	protocolGemini    proxyProtocol = "gemini"
+)
+
+const (
+	RoutingPriority           = "priority"
+	RoutingRoundRobin         = "round_robin"
+	RoutingWeightedRoundRobin = "weighted_round_robin"
+)
+
+type proxyTarget struct {
+	User        *model.User
+	APIKey      *model.APIKey
+	ModelName   string
+	ModelConfig model.ModelConfig
+	Channel     model.Channel
+}
+
+type normalizedAIRequest struct {
+	Model       string
+	Messages    []normalizedAIMessage
+	System      string
+	MaxTokens   int
+	Temperature *float64
+	Stream      bool
+}
+
+type normalizedAIMessage struct {
+	Role    string
+	Content string
+}
+
+type preparedUpstreamRequest struct {
+	Method string
+	URL    string
+	Body   []byte
+	Header http.Header
+}
+
+type providerResponseData struct {
+	ID                      string
+	Text                    string
+	InputTokens             int
+	OutputTokens            int
+	CachedInputTokens       int
+	CacheWriteInputTokens   int
+	CacheWrite1hInputTokens int
+	ImageInputTokens        int
+	ImageOutputTokens       int
+	AudioInputTokens        int
+	AudioOutputTokens       int
+}
+
+type usageTokenCounts struct {
+	InputTokens             int
+	OutputTokens            int
+	CachedInputTokens       int
+	CacheReadInputTokens    int
+	CacheWriteInputTokens   int
+	CacheWrite1hInputTokens int
+	ImageInputTokens        int
+	ImageOutputTokens       int
+	AudioInputTokens        int
+	AudioOutputTokens       int
+}
+
+func (s *ProxyService) ListModels(c *gin.Context) {
+	var modelNames []string
+	apiKey := currentAPIKey(c)
+	query := model.DB.Table("model_configs").
+		Joins("JOIN models ON models.id = model_configs.model_id").
+		Joins("JOIN channels ON channels.id = model_configs.channel_id").
+		Joins("JOIN user_channels ON user_channels.id = channels.user_channel_id").
+		Where("channels.enabled = ? AND model_configs.enabled = ? AND models.enabled = ? AND user_channels.enabled = ?", true, true, true, true)
+	allowedUserChannels, ok := requiredAPIKeyUserChannels(apiKey)
+	if !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": "API key must be bound to exactly one user channel"})
+		return
+	}
+	if len(allowedUserChannels) > 0 {
+		query = query.Where("channels.user_channel_id IN ?", allowedUserChannels)
+	}
+	if err := query.
+		Distinct("models.model_name").
+		Order("models.model_name ASC").
+		Pluck("models.model_name", &modelNames).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list models"})
+		return
+	}
+	modelNames = filterModelsForAPIKey(modelNames, currentAPIKey(c))
+
+	items := make([]modelListDataItem, 0, len(modelNames))
+	for _, name := range modelNames {
+		items = append(items, modelListDataItem{
+			ID:      name,
+			Object:  "model",
+			Created: 0,
+			OwnedBy: "flai",
+		})
+	}
+
+	c.JSON(http.StatusOK, modelListResponse{
+		Object: "list",
+		Data:   items,
+	})
+}
+
+// HandleRequest handles the incoming API request, routes it to an upstream, and manages billing
+func (s *ProxyService) HandleRequest(c *gin.Context) {
+	requestBody, bodyBytes, ok := readProxyJSONBody(c)
+	if !ok {
+		return
+	}
+
+	modelName, ok := requestBody["model"].(string)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Model not specified"})
+		return
+	}
+
+	if isResponsesPath(c.Request.URL.Path) {
+		s.handleConvertedProviderRequest(c, protocolResponses, modelName, requestBody, bodyBytes)
+		return
+	}
+	s.handleConvertedProviderRequest(c, protocolOpenAI, modelName, requestBody, bodyBytes)
+}
+
+func (s *ProxyService) HandleImageGeneration(c *gin.Context) {
+	requestBody, _, ok := readProxyJSONBody(c)
+	if !ok {
+		return
+	}
+
+	modelName, ok := requestBody["model"].(string)
+	if !ok || strings.TrimSpace(modelName) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Model not specified"})
+		return
+	}
+
+	target, ok := s.resolveTarget(c, modelName)
+	if !ok {
+		return
+	}
+
+	if SensitiveFilterEnabled() {
+		if _, matched := MatchSensitiveWords(imageRequestText(requestBody)); matched {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Request blocked by content policy", "type": "content_policy"})
+			return
+		}
+	}
+
+	upstreamProtocol := channelProtocol(target.Channel.Type)
+	if !supportsOpenAIImageEndpoint(upstreamProtocol) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Image generation is only supported for OpenAI-compatible upstream channels", "type": "unsupported_upstream"})
+		return
+	}
+
+	if err := ValidateConfiguredHTTPURL(target.Channel.BaseURL); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Upstream URL blocked by SSRF protection", "type": "upstream_error"})
+		return
+	}
+
+	prepared, err := prepareOpenAIImageGenerationRequest(&target.Channel, target.upstreamModelName(), requestBody)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "type": "invalid_request"})
+		return
+	}
+
+	resp, err := s.doUpstreamRequest(prepared)
+	if err != nil {
+		logUpstreamRequestFailure(c, &target.Channel, prepared.URL, prepared.Body, err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Upstream request failed", "type": "upstream_error"})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to read upstream response"})
+			return
+		}
+		logUpstreamError(c, &target.Channel, prepared.URL, resp.StatusCode, prepared.Body, respBody)
+		c.JSON(resp.StatusCode, gin.H{"error": "Upstream request failed", "type": "upstream_error"})
+		return
+	}
+
+	if isStreamingResponse(resp) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Streaming is not supported for this endpoint", "type": "unsupported_stream"})
+		return
+	}
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to read upstream response"})
+		return
+	}
+
+	var responseData map[string]interface{}
+	_ = json.Unmarshal(respBody, &responseData)
+	if SensitiveFilterEnabled() && SensitiveFilterScope() == SensitiveFilterScopeRequestResponse && responseData != nil {
+		if _, matched := MatchSensitiveWords(imageResponseText(responseData)); matched {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Response blocked by content policy", "type": "content_policy"})
+			return
+		}
+	}
+
+	usage := imageUsageTokenCounts(target.ModelName, requestBody, responseData)
+	if status, message, err := s.billUsage(c, target.User, target.APIKey, &target.Channel, &target.ModelConfig, target.ModelName, usage); err != nil {
+		c.JSON(status, gin.H{"error": message})
+		return
+	}
+
+	writeUpstreamResponse(c, resp, respBody)
+}
+
+func (s *ProxyService) HandleClaudeMessages(c *gin.Context) {
+	requestBody, bodyBytes, ok := readProxyJSONBody(c)
+	if !ok {
+		return
+	}
+	modelName, ok := requestBody["model"].(string)
+	if !ok || strings.TrimSpace(modelName) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Model not specified"})
+		return
+	}
+
+	s.handleConvertedProviderRequest(c, protocolClaude, modelName, requestBody, bodyBytes)
+}
+
+func (s *ProxyService) HandleGeminiGenerateContent(c *gin.Context) {
+	modelName, action, ok := geminiModelAction(c.Param("modelAction"))
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Not found"})
+		return
+	}
+	if action == "streamGenerateContent" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Streaming is not supported for this endpoint", "type": "unsupported_stream"})
+		return
+	}
+	if action != "generateContent" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Not found"})
+		return
+	}
+
+	requestBody, bodyBytes, ok := readProxyJSONBody(c)
+	if !ok {
+		return
+	}
+	s.handleConvertedProviderRequest(c, protocolGemini, modelName, requestBody, bodyBytes)
+}
+
+func readProxyJSONBody(c *gin.Context) (map[string]interface{}, []byte, bool) {
+	bodyBytes, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read request body"})
+		return nil, nil, false
+	}
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+	var requestBody map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &requestBody); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return nil, nil, false
+	}
+	return requestBody, bodyBytes, true
+}
+
+func (s *ProxyService) handleConvertedProviderRequest(c *gin.Context, clientProtocol proxyProtocol, modelName string, requestBody map[string]interface{}, originalBody []byte) {
+	target, ok := s.resolveTarget(c, modelName)
+	if !ok {
+		return
+	}
+
+	normalized := normalizeProviderRequest(clientProtocol, c.Request.URL.Path, requestBody, target.upstreamModelName())
+	if SensitiveFilterEnabled() {
+		if _, matched := MatchSensitiveWords(normalizedRequestText(normalized)); matched {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Request blocked by content policy", "type": "content_policy"})
+			return
+		}
+	}
+	upstreamProtocol := channelProtocol(target.Channel.Type)
+	if normalized.Stream && upstreamProtocol != clientProtocol {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Streaming is not supported when converting upstream protocol", "type": "unsupported_stream"})
+		return
+	}
+
+	if err := ValidateConfiguredHTTPURL(target.Channel.BaseURL); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Upstream URL blocked by SSRF protection", "type": "upstream_error"})
+		return
+	}
+
+	prepared, err := prepareProviderRequest(&target.Channel, upstreamProtocol, normalized)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "type": "invalid_request"})
+		return
+	}
+	resp, err := s.doUpstreamRequest(prepared)
+	if err != nil {
+		logUpstreamRequestFailure(c, &target.Channel, prepared.URL, prepared.Body, err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Upstream request failed", "type": "upstream_error"})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to read upstream response"})
+			return
+		}
+		logUpstreamError(c, &target.Channel, prepared.URL, resp.StatusCode, prepared.Body, respBody)
+		c.JSON(resp.StatusCode, gin.H{"error": "Upstream request failed", "type": "upstream_error"})
+		return
+	}
+
+	if normalized.Stream || isStreamingResponse(resp) {
+		if upstreamProtocol != clientProtocol {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Streaming is not supported when converting upstream protocol", "type": "unsupported_stream"})
+			return
+		}
+		respBody, err := streamUpstreamResponse(c, resp)
+		if err != nil {
+			log.Printf("failed to stream upstream response: %v", err)
+			return
+		}
+		usage, ok := parseUsageTokensFromStream(respBody)
+		if !ok {
+			usage = usageTokenCounts{
+				InputTokens:  CountTokens(target.ModelName, string(originalBody)),
+				OutputTokens: CountTokens(target.ModelName, string(respBody)),
+			}
+		}
+		if _, _, err := s.billUsage(c, target.User, target.APIKey, &target.Channel, &target.ModelConfig, target.ModelName, usage); err != nil {
+			log.Printf("failed to bill streaming usage for user=%d model=%s: %v", target.User.ID, target.ModelName, err)
+		}
+		return
+	}
+
+	s.handleNonStreamingResponse(c, resp, target, originalBody, prepared.URL, prepared.Body, upstreamProtocol, clientProtocol, clientProtocol == protocolResponses)
+}
+
+func (s *ProxyService) resolveTarget(c *gin.Context, modelName string) (*proxyTarget, bool) {
+	val, _ := c.Get("user")
+	user, ok := val.(*model.User)
+	if !ok || user == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return nil, false
+	}
+
+	modelName = strings.TrimSpace(strings.TrimPrefix(modelName, "models/"))
+	if modelName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Model not specified"})
+		return nil, false
+	}
+
+	apiKey := currentAPIKey(c)
+	if !APIKeyAllowsModel(apiKey, modelName) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "API key is not allowed to use this model"})
+		return nil, false
+	}
+
+	var candidates []model.ModelConfig
+	query := model.DB.
+		Preload("Channel.UserChannel").
+		Preload("Model").
+		Joins("JOIN channels ON channels.id = model_configs.channel_id").
+		Joins("JOIN models ON models.id = model_configs.model_id").
+		Joins("JOIN user_channels ON user_channels.id = channels.user_channel_id").
+		Where("channels.enabled = ? AND model_configs.enabled = ? AND models.enabled = ? AND models.model_name = ? AND user_channels.enabled = ?", true, true, true, modelName, true)
+	allowedUserChannels, ok := requiredAPIKeyUserChannels(apiKey)
+	if !ok {
+		c.JSON(http.StatusForbidden, gin.H{"error": "API key must be bound to exactly one user channel"})
+		return nil, false
+	}
+	if len(allowedUserChannels) > 0 {
+		query = query.Where("channels.user_channel_id IN ?", allowedUserChannels)
+	}
+	if err := query.Order("channels.priority DESC, channels.weight DESC, channels.id ASC").Find(&candidates).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to find available channels"})
+		return nil, false
+	}
+	if len(candidates) == 0 {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "No available channel for this model"})
+		return nil, false
+	}
+	modelConfig := s.selectModelConfig(candidates, modelName)
+
+	channel := modelConfig.Channel
+	if channel.ID == 0 {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "No enabled model configuration for this model"})
+		return nil, false
+	}
+	if user.Balance.LessThanOrEqual(decimal.Zero) {
+		c.JSON(http.StatusPaymentRequired, gin.H{"error": "Insufficient balance"})
+		return nil, false
+	}
+
+	return &proxyTarget{
+		User:        user,
+		APIKey:      apiKey,
+		ModelName:   modelName,
+		ModelConfig: modelConfig,
+		Channel:     channel,
+	}, true
+}
+
+func (target *proxyTarget) upstreamModelName() string {
+	if target == nil {
+		return ""
+	}
+	upstreamModelName := strings.TrimSpace(target.ModelConfig.UpstreamModelName)
+	if upstreamModelName == "" {
+		return target.ModelName
+	}
+	return upstreamModelName
+}
+
+func (s *ProxyService) selectModelConfig(candidates []model.ModelConfig, modelName string) model.ModelConfig {
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+	algorithm := RoutingAlgorithm(candidates[0].Channel.UserChannel.RoutingAlgorithm)
+	userChannelID := uint(0)
+	if candidates[0].Channel.UserChannelID != nil {
+		userChannelID = *candidates[0].Channel.UserChannelID
+	}
+
+	switch algorithm {
+	case RoutingRoundRobin:
+		index := s.nextRoutingCounter(algorithm, userChannelID, modelName) % uint64(len(candidates))
+		return candidates[int(index)]
+	case RoutingWeightedRoundRobin:
+		totalWeight := 0
+		for _, candidate := range candidates {
+			totalWeight += normalizedChannelWeight(candidate.Channel.Weight)
+		}
+		if totalWeight <= 0 {
+			return candidates[0]
+		}
+		position := int(s.nextRoutingCounter(algorithm, userChannelID, modelName) % uint64(totalWeight))
+		for _, candidate := range candidates {
+			weight := normalizedChannelWeight(candidate.Channel.Weight)
+			if position < weight {
+				return candidate
+			}
+			position -= weight
+		}
+		return candidates[0]
+	default:
+		return candidates[0]
+	}
+}
+
+func (s *ProxyService) nextRoutingCounter(algorithm string, userChannelID uint, modelName string) uint64 {
+	key := fmt.Sprintf("%s:%d:%s", algorithm, userChannelID, modelName)
+	s.routingMu.Lock()
+	defer s.routingMu.Unlock()
+	value := s.routingCounters[key]
+	s.routingCounters[key] = value + 1
+	return value
+}
+
+func normalizedChannelWeight(weight int) int {
+	if weight <= 0 {
+		return 1
+	}
+	return weight
+}
+
+func RoutingAlgorithm(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case RoutingRoundRobin, "roundrobin", "rr":
+		return RoutingRoundRobin
+	case RoutingWeightedRoundRobin, "weighted", "weighted_roundrobin", "wrr":
+		return RoutingWeightedRoundRobin
+	default:
+		return RoutingPriority
+	}
+}
+
+func (s *ProxyService) handleNonStreamingResponse(c *gin.Context, resp *http.Response, target *proxyTarget, originalBody []byte, upstreamURL string, upstreamBody []byte, upstreamProtocol proxyProtocol, clientProtocol proxyProtocol, responses bool) {
+	if resp.StatusCode >= http.StatusBadRequest {
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to read upstream response"})
+			return
+		}
+		logUpstreamError(c, &target.Channel, upstreamURL, resp.StatusCode, upstreamBody, respBody)
+		c.JSON(resp.StatusCode, gin.H{"error": "Upstream request failed", "type": "upstream_error"})
+		return
+	}
+
+	if isStreamingResponse(resp) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Streaming is not supported for this endpoint", "type": "unsupported_stream"})
+		return
+	}
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to read upstream response"})
+		return
+	}
+	clientBody := respBody
+	if upstreamProtocol != clientProtocol {
+		clientBody, err = transformProviderResponse(respBody, upstreamProtocol, clientProtocol, responses, target.ModelName)
+		if err != nil {
+			log.Printf(
+				"failed to transform upstream response: method=%s path=%s channel_id=%d upstream_url=%s error=%v response_body=%q",
+				c.Request.Method,
+				c.Request.URL.RequestURI(),
+				target.Channel.ID,
+				redactedUpstreamURL(upstreamURL),
+				err,
+				proxyBodyPreview(respBody, 1000),
+			)
+			c.JSON(http.StatusBadGateway, gin.H{"error": "Upstream request failed", "type": "upstream_error"})
+			return
+		}
+	}
+
+	var responseData map[string]interface{}
+	_ = json.Unmarshal(clientBody, &responseData)
+	if SensitiveFilterEnabled() && SensitiveFilterScope() == SensitiveFilterScopeRequestResponse && responseData != nil {
+		text := providerResponseFromPayload(responseData, clientProtocol).Text
+		if _, matched := MatchSensitiveWords(text); matched {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Response blocked by content policy", "type": "content_policy"})
+			return
+		}
+	}
+	usage, ok := parseUsageTokens(responseData)
+	if !ok {
+		usage = usageTokenCounts{
+			InputTokens:  CountTokens(target.ModelName, string(originalBody)),
+			OutputTokens: CountTokens(target.ModelName, string(clientBody)),
+		}
+	}
+	if status, message, err := s.billUsage(c, target.User, target.APIKey, &target.Channel, &target.ModelConfig, target.ModelName, usage); err != nil {
+		c.JSON(status, gin.H{"error": message})
+		return
+	}
+
+	if upstreamProtocol == clientProtocol {
+		writeUpstreamResponse(c, resp, clientBody)
+		return
+	}
+	writeJSONProxyResponse(c, resp.StatusCode, clientBody)
+}
+
+func (s *ProxyService) billUsage(c *gin.Context, user *model.User, apiKey *model.APIKey, channel *model.Channel, modelConfig *model.ModelConfig, modelName string, usage usageTokenCounts) (int, string, error) {
+	groupMultiplier, err := effectiveUserGroupMultiplier(user, channel.ID, modelConfig.ID)
+	if err != nil {
+		return http.StatusInternalServerError, "User group not found", err
+	}
+	usage = normalizeUsageTokenCounts(usage)
+
+	// Final cost calculation
+	// Prices are stored per 1M tokens.
+	cost := calculateModelUsageCost(usage, modelConfig.Model).
+		Mul(groupMultiplier).
+		Mul(userChannelMultiplier(channel))
+
+	// 7. Deduct balance and log
+	tx := model.DB.Begin()
+	if tx.Error != nil {
+		return http.StatusInternalServerError, "Failed to start transaction", tx.Error
+	}
+
+	balanceUpdate := tx.Model(&model.User{}).
+		Where("id = ? AND balance >= ?", user.ID, cost).
+		UpdateColumn("balance", gorm.Expr("balance - ?", cost))
+	if balanceUpdate.Error != nil {
+		tx.Rollback()
+		return http.StatusInternalServerError, "Failed to update balance", balanceUpdate.Error
+	}
+	if balanceUpdate.RowsAffected == 0 {
+		tx.Rollback()
+		return http.StatusPaymentRequired, "Insufficient balance", fmt.Errorf("insufficient balance")
+	}
+
+	tokenLog := model.TokenLog{
+		UserID:                  user.ID,
+		APIKeyID:                apiKeyID(apiKey),
+		UserChannelID:           channel.UserChannelID,
+		ChannelID:               channel.ID,
+		ModelName:               modelName,
+		InputTokens:             usage.InputTokens,
+		OutputTokens:            usage.OutputTokens,
+		CachedInputTokens:       usage.CachedInputTokens,
+		CacheWriteInputTokens:   usage.CacheWriteInputTokens,
+		CacheWrite1hInputTokens: usage.CacheWrite1hInputTokens,
+		ImageInputTokens:        usage.ImageInputTokens,
+		ImageOutputTokens:       usage.ImageOutputTokens,
+		AudioInputTokens:        usage.AudioInputTokens,
+		AudioOutputTokens:       usage.AudioOutputTokens,
+		Cost:                    cost,
+		IP:                      c.ClientIP(),
+		UserAgent:               c.Request.UserAgent(),
+		CreatedAt:               time.Now(),
+	}
+	if err := tx.Create(&tokenLog).Error; err != nil {
+		tx.Rollback()
+		return http.StatusInternalServerError, "Failed to log usage", err
+	}
+	if err := applyReferralCommission(tx, user, tokenLog.ID, cost); err != nil {
+		tx.Rollback()
+		return http.StatusInternalServerError, "Failed to apply referral commission", err
+	}
+	if err := tx.Commit().Error; err != nil {
+		return http.StatusInternalServerError, "Failed to commit usage", err
+	}
+
+	return 0, "", nil
+}
+
+func calculateModelUsageCost(usage usageTokenCounts, modelConfig model.Model) decimal.Decimal {
+	metrics := PriceTierMetrics{
+		FullInputTokens:      usage.InputTokens,
+		BillableInputTokens:  billableInputTokens(usage),
+		BillableOutputTokens: usage.OutputTokens,
+	}
+
+	inputTokens := billableInputTokens(usage)
+	outputTokens := usage.OutputTokens
+	total := decimal.Zero
+
+	imageInputTokens := 0
+	if hasDedicatedPrice(modelConfig.ImageInputPrice, modelConfig.ImageInputPriceTiers) {
+		imageInputTokens = clampTokenCount(usage.ImageInputTokens, inputTokens)
+		inputTokens -= imageInputTokens
+		total = total.Add(CalculateTieredTokenCostWithMetrics(imageInputTokens, modelConfig.ImageInputPrice, modelConfig.ImageInputPriceTiers, metrics))
+	}
+	audioInputTokens := 0
+	if hasDedicatedPrice(modelConfig.AudioInputPrice, modelConfig.AudioInputPriceTiers) {
+		audioInputTokens = clampTokenCount(usage.AudioInputTokens, inputTokens)
+		inputTokens -= audioInputTokens
+		total = total.Add(CalculateTieredTokenCostWithMetrics(audioInputTokens, modelConfig.AudioInputPrice, modelConfig.AudioInputPriceTiers, metrics))
+	}
+
+	imageOutputTokens := 0
+	if hasDedicatedPrice(modelConfig.ImageOutputPrice, modelConfig.ImageOutputPriceTiers) {
+		imageOutputTokens = clampTokenCount(usage.ImageOutputTokens, outputTokens)
+		outputTokens -= imageOutputTokens
+		total = total.Add(CalculateTieredTokenCostWithMetrics(imageOutputTokens, modelConfig.ImageOutputPrice, modelConfig.ImageOutputPriceTiers, metrics))
+	}
+	audioOutputTokens := 0
+	if hasDedicatedPrice(modelConfig.AudioOutputPrice, modelConfig.AudioOutputPriceTiers) {
+		audioOutputTokens = clampTokenCount(usage.AudioOutputTokens, outputTokens)
+		outputTokens -= audioOutputTokens
+		total = total.Add(CalculateTieredTokenCostWithMetrics(audioOutputTokens, modelConfig.AudioOutputPrice, modelConfig.AudioOutputPriceTiers, metrics))
+	}
+
+	return total.
+		Add(CalculateTieredTokenCostWithMetrics(inputTokens, modelConfig.InputPrice, modelConfig.InputPriceTiers, metrics)).
+		Add(CalculateTieredTokenCostWithMetrics(usage.CacheReadInputTokens, modelConfig.CachedInputPrice, modelConfig.CachedInputPriceTiers, metrics)).
+		Add(CalculateTieredTokenCostWithMetrics(usage.CacheWriteInputTokens, modelConfig.CacheWriteInputPrice, modelConfig.CacheWriteInputPriceTiers, metrics)).
+		Add(CalculateTieredTokenCostWithMetrics(usage.CacheWrite1hInputTokens, modelConfig.CacheWrite1hInputPrice, modelConfig.CacheWrite1hInputPriceTiers, metrics)).
+		Add(CalculateTieredTokenCostWithMetrics(outputTokens, modelConfig.OutputPrice, modelConfig.OutputPriceTiers, metrics))
+}
+
+func billableInputTokens(usage usageTokenCounts) int {
+	tokens := usage.InputTokens - usage.CacheReadInputTokens - usage.CacheWriteInputTokens - usage.CacheWrite1hInputTokens
+	if tokens < 0 {
+		return 0
+	}
+	return tokens
+}
+
+func hasDedicatedPrice(price decimal.Decimal, tiers model.PriceTierList) bool {
+	return !price.IsZero() || len(model.NormalizePriceTiers(tiers)) > 0
+}
+
+func clampTokenCount(tokens int, maxTokens int) int {
+	if tokens < 0 {
+		return 0
+	}
+	if tokens > maxTokens {
+		return maxTokens
+	}
+	return tokens
+}
+
+func applyReferralCommission(tx *gorm.DB, user *model.User, tokenLogID uint, cost decimal.Decimal) error {
+	if user == nil || user.ReferrerID == nil || *user.ReferrerID == 0 || cost.LessThanOrEqual(decimal.Zero) {
+		return nil
+	}
+	if !settingBool("referral_enabled", false) {
+		return nil
+	}
+	rate, err := decimal.NewFromString(strings.TrimSpace(model.GetSystemSetting("referral_commission_rate", "0")))
+	if err != nil || rate.LessThanOrEqual(decimal.Zero) {
+		return nil
+	}
+	if rate.GreaterThan(decimal.NewFromInt(1)) {
+		rate = rate.Div(decimal.NewFromInt(100))
+	}
+	amount := cost.Mul(rate)
+	if amount.LessThanOrEqual(decimal.Zero) {
+		return nil
+	}
+
+	commission := model.ReferralCommissionLog{
+		ReferrerID:     *user.ReferrerID,
+		ReferredUserID: user.ID,
+		TokenLogID:     tokenLogID,
+		BaseCost:       cost,
+		Rate:           rate,
+		Amount:         amount,
+	}
+	if err := tx.Create(&commission).Error; err != nil {
+		return err
+	}
+	return tx.Model(&model.User{}).
+		Where("id = ?", *user.ReferrerID).
+		UpdateColumn("balance", gorm.Expr("balance + ?", amount)).Error
+}
+
+func userChannelMultiplier(channel *model.Channel) decimal.Decimal {
+	if channel == nil || channel.UserChannel.ID == 0 || channel.UserChannel.Multiplier.IsZero() {
+		return decimal.NewFromInt(1)
+	}
+	return channel.UserChannel.Multiplier
+}
+
+func effectiveUserGroupMultiplier(user *model.User, channelID uint, modelConfigID uint) (decimal.Decimal, error) {
+	multipliers, err := activeGroupMultipliers(user, channelID, modelConfigID)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	if len(multipliers) == 0 {
+		return decimal.NewFromInt(1), nil
+	}
+
+	selected := multipliers[0]
+	mode := strings.ToLower(strings.TrimSpace(model.GetSystemSetting("group_multiplier_mode", "min")))
+	for _, multiplier := range multipliers[1:] {
+		if mode == "max" || mode == "high" || mode == "higher" {
+			if multiplier.GreaterThan(selected) {
+				selected = multiplier
+			}
+			continue
+		}
+		if multiplier.LessThan(selected) {
+			selected = multiplier
+		}
+	}
+	return selected, nil
+}
+
+func activeGroupMultipliers(user *model.User, channelID uint, modelConfigID uint) ([]decimal.Decimal, error) {
+	now := time.Now()
+	var memberships []model.UserGroupMembership
+	err := model.DB.Preload("Group").
+		Where("user_id = ? AND (expires_at IS NULL OR expires_at > ?)", user.ID, now).
+		Find(&memberships).Error
+	if err != nil {
+		return nil, err
+	}
+	if len(memberships) == 0 && user.GroupID != 0 {
+		var group model.Group
+		if err := model.DB.First(&group, user.GroupID).Error; err != nil {
+			return nil, err
+		}
+		memberships = append(memberships, model.UserGroupMembership{UserID: user.ID, GroupID: group.ID, Group: group})
+	}
+
+	groupIDs := make([]uint, 0, len(memberships))
+	for _, membership := range memberships {
+		groupIDs = append(groupIDs, membership.GroupID)
+	}
+
+	channelOverrides := map[uint]decimal.Decimal{}
+	if len(groupIDs) > 0 {
+		var overrides []model.ChannelGroupMultiplier
+		if err := model.DB.Where("channel_id = ? AND group_id IN ?", channelID, groupIDs).Find(&overrides).Error; err != nil {
+			return nil, err
+		}
+		for _, override := range overrides {
+			channelOverrides[override.GroupID] = override.Multiplier
+		}
+	}
+
+	modelOverrides := map[uint]decimal.Decimal{}
+	if len(groupIDs) > 0 {
+		var overrides []model.ModelGroupMultiplier
+		if err := model.DB.Where("model_config_id = ? AND group_id IN ?", modelConfigID, groupIDs).Find(&overrides).Error; err != nil {
+			return nil, err
+		}
+		for _, override := range overrides {
+			modelOverrides[override.GroupID] = override.Multiplier
+		}
+	}
+
+	multipliers := make([]decimal.Decimal, 0, len(memberships))
+	for _, membership := range memberships {
+		multiplier := membership.Group.Multiplier
+		if multiplier.IsZero() {
+			multiplier = decimal.NewFromInt(1)
+		}
+		if override, ok := channelOverrides[membership.GroupID]; ok && !override.IsZero() {
+			multiplier = override
+		}
+		if override, ok := modelOverrides[membership.GroupID]; ok && !override.IsZero() {
+			multiplier = override
+		}
+		multipliers = append(multipliers, multiplier)
+	}
+	return multipliers, nil
+}
+
+func filterModelsForAPIKey(modelNames []string, apiKey *model.APIKey) []string {
+	if apiKey == nil {
+		return modelNames
+	}
+	allowed := ParseList(apiKey.AllowedModels)
+	if len(allowed) == 0 {
+		return modelNames
+	}
+	allowedSet := map[string]struct{}{}
+	for _, name := range allowed {
+		allowedSet[name] = struct{}{}
+	}
+	filtered := make([]string, 0, len(modelNames))
+	for _, name := range modelNames {
+		if _, ok := allowedSet[name]; ok {
+			filtered = append(filtered, name)
+		}
+	}
+	return filtered
+}
+
+func currentAPIKey(c *gin.Context) *model.APIKey {
+	value, exists := c.Get("api_key")
+	if !exists {
+		return nil
+	}
+	apiKey, ok := value.(*model.APIKey)
+	if !ok {
+		return nil
+	}
+	return apiKey
+}
+
+func apiKeyID(apiKey *model.APIKey) *uint {
+	if apiKey == nil || apiKey.ID == 0 {
+		return nil
+	}
+	return &apiKey.ID
+}
+
+func apiKeyAllowedUserChannels(apiKey *model.APIKey) string {
+	if apiKey == nil {
+		return ""
+	}
+	return apiKey.AllowedUserChannels
+}
+
+func requiredAPIKeyUserChannels(apiKey *model.APIKey) ([]uint, bool) {
+	if apiKey == nil {
+		return nil, true
+	}
+	allowed := ParseUintList(apiKeyAllowedUserChannels(apiKey))
+	return allowed, len(allowed) == 1
+}
+
+func isStreamingRequest(requestBody map[string]interface{}) bool {
+	stream, ok := requestBody["stream"].(bool)
+	return ok && stream
+}
+
+func isStreamingResponse(resp *http.Response) bool {
+	return strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream")
+}
+
+func streamUpstreamResponse(c *gin.Context, resp *http.Response) ([]byte, error) {
+	for k, v := range resp.Header {
+		if !shouldSkipProxyResponseHeader(k, true) {
+			c.Writer.Header()[k] = v
+		}
+	}
+	c.Writer.WriteHeader(resp.StatusCode)
+
+	flusher, _ := c.Writer.(http.Flusher)
+	var buffered bytes.Buffer
+	chunk := make([]byte, 32*1024)
+
+	for {
+		n, readErr := resp.Body.Read(chunk)
+		if n > 0 {
+			data := chunk[:n]
+			if buffered.Len() < maxBufferedStreamBytes {
+				remaining := maxBufferedStreamBytes - buffered.Len()
+				if len(data) > remaining {
+					buffered.Write(data[:remaining])
+				} else {
+					buffered.Write(data)
+				}
+			}
+			if _, err := c.Writer.Write(data); err != nil {
+				return buffered.Bytes(), err
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return buffered.Bytes(), readErr
+		}
+	}
+
+	return buffered.Bytes(), nil
+}
+
+func parseUsageTokensFromStream(body []byte) (usageTokenCounts, bool) {
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	scanner.Buffer(make([]byte, 0, 64*1024), maxBufferedStreamBytes)
+
+	var usage usageTokenCounts
+	var found bool
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+
+		var data map[string]interface{}
+		if err := json.Unmarshal([]byte(payload), &data); err != nil {
+			continue
+		}
+		if parsedUsage, ok := parseUsageTokens(data); ok {
+			usage = parsedUsage
+			found = true
+		}
+	}
+
+	return usage, found
+}
+
+func writeUpstreamResponse(c *gin.Context, resp *http.Response, respBody []byte) {
+	for k, v := range resp.Header {
+		if !shouldSkipProxyResponseHeader(k, false) {
+			c.Writer.Header()[k] = v
+		}
+	}
+	c.Writer.WriteHeader(resp.StatusCode)
+	c.Writer.Write(respBody)
+}
+
+func (s *ProxyService) forwardToUpstream(channel *model.Channel, method, path string, body []byte, originalHeader http.Header) (*http.Response, error) {
+	if path == "" || !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	fullURL := upstreamURLForRequest(channel.BaseURL, path)
+
+	req, err := http.NewRequest(method, fullURL, bytes.NewBuffer(body))
+	if err != nil {
+		return nil, err
+	}
+
+	// Copy headers and set Authorization
+	for k, v := range originalHeader {
+		if !shouldSkipProxyHeader(k) {
+			req.Header[k] = v
+		}
+	}
+	req.Header.Set("Authorization", "Bearer "+channel.APIKey)
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	return client.Do(req)
+}
+
+func (s *ProxyService) doUpstreamRequest(prepared preparedUpstreamRequest) (*http.Response, error) {
+	req, err := http.NewRequest(prepared.Method, prepared.URL, bytes.NewBuffer(prepared.Body))
+	if err != nil {
+		return nil, err
+	}
+	for key, values := range prepared.Header {
+		req.Header[key] = values
+	}
+	client := &http.Client{Timeout: 60 * time.Second}
+	return client.Do(req)
+}
+
+func rawProviderRequest(channel *model.Channel, protocol proxyProtocol, method, path string, body []byte, originalHeader http.Header) preparedUpstreamRequest {
+	fullURL := upstreamURLForRequest(channel.BaseURL, path)
+	if protocol == protocolGemini && strings.TrimSpace(channel.APIKey) != "" {
+		fullURL = withQueryParam(fullURL, "key", strings.TrimSpace(channel.APIKey))
+	}
+	return preparedUpstreamRequest{
+		Method: method,
+		URL:    fullURL,
+		Body:   body,
+		Header: providerHeadersFromOriginal(channel, protocol, originalHeader),
+	}
+}
+
+func providerHeadersFromOriginal(channel *model.Channel, protocol proxyProtocol, originalHeader http.Header) http.Header {
+	headers := http.Header{}
+	for key, values := range originalHeader {
+		if shouldSkipProxyHeader(key) || shouldSkipProviderAuthHeader(key) {
+			continue
+		}
+		headers[key] = values
+	}
+	if headers.Get("Content-Type") == "" {
+		headers.Set("Content-Type", "application/json")
+	}
+	if headers.Get("Accept") == "" {
+		headers.Set("Accept", "application/json")
+	}
+
+	apiKey := strings.TrimSpace(channel.APIKey)
+	switch protocol {
+	case protocolClaude:
+		if apiKey != "" {
+			headers.Set("x-api-key", apiKey)
+			headers.Set("Authorization", "Bearer "+apiKey)
+		}
+		if headers.Get("anthropic-version") == "" {
+			headers.Set("anthropic-version", "2023-06-01")
+		}
+	case protocolGemini:
+		if apiKey != "" {
+			headers.Set("x-goog-api-key", apiKey)
+		}
+	default:
+		if apiKey != "" {
+			headers.Set("Authorization", "Bearer "+apiKey)
+		}
+	}
+	return headers
+}
+
+func shouldSkipProviderAuthHeader(key string) bool {
+	switch strings.ToLower(key) {
+	case "x-api-key", "x-goog-api-key", "api-key":
+		return true
+	default:
+		return false
+	}
+}
+
+func upstreamURLForRequest(baseURL string, path string) string {
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	for _, prefix := range []string{"/v1", "/v1beta"} {
+		if strings.HasSuffix(strings.ToLower(base), prefix) {
+			if path == prefix {
+				return base
+			}
+			if strings.HasPrefix(path, prefix+"/") {
+				return base + strings.TrimPrefix(path, prefix)
+			}
+			return base[:len(base)-len(prefix)] + path
+		}
+	}
+	return base + path
+}
+
+func prepareProviderRequest(channel *model.Channel, protocol proxyProtocol, request normalizedAIRequest) (preparedUpstreamRequest, error) {
+	switch protocol {
+	case protocolResponses:
+		body, err := openAIResponsesPayload(request)
+		if err != nil {
+			return preparedUpstreamRequest{}, err
+		}
+		headers := jsonHeaders()
+		headers.Set("Authorization", "Bearer "+strings.TrimSpace(channel.APIKey))
+		return preparedUpstreamRequest{
+			Method: http.MethodPost,
+			URL:    upstreamURLForRequest(channel.BaseURL, "/v1/responses"),
+			Body:   body,
+			Header: headers,
+		}, nil
+	case protocolClaude:
+		body, err := claudeMessagesPayload(request)
+		if err != nil {
+			return preparedUpstreamRequest{}, err
+		}
+		headers := jsonHeaders()
+		headers.Set("x-api-key", strings.TrimSpace(channel.APIKey))
+		headers.Set("Authorization", "Bearer "+strings.TrimSpace(channel.APIKey))
+		headers.Set("anthropic-version", "2023-06-01")
+		return preparedUpstreamRequest{
+			Method: http.MethodPost,
+			URL:    upstreamURLForRequest(channel.BaseURL, "/v1/messages"),
+			Body:   body,
+			Header: headers,
+		}, nil
+	case protocolGemini:
+		body, err := geminiGenerateContentPayload(request)
+		if err != nil {
+			return preparedUpstreamRequest{}, err
+		}
+		fullURL := upstreamURLForRequest(channel.BaseURL, "/v1beta/models/"+url.PathEscape(strings.TrimPrefix(request.Model, "models/"))+":generateContent")
+		if strings.TrimSpace(channel.APIKey) != "" {
+			fullURL = withQueryParam(fullURL, "key", strings.TrimSpace(channel.APIKey))
+		}
+		return preparedUpstreamRequest{
+			Method: http.MethodPost,
+			URL:    fullURL,
+			Body:   body,
+			Header: jsonHeaders(),
+		}, nil
+	case protocolOpenAI:
+		body, err := openAIChatCompletionsPayload(request)
+		if err != nil {
+			return preparedUpstreamRequest{}, err
+		}
+		headers := jsonHeaders()
+		headers.Set("Authorization", "Bearer "+strings.TrimSpace(channel.APIKey))
+		return preparedUpstreamRequest{
+			Method: http.MethodPost,
+			URL:    upstreamURLForRequest(channel.BaseURL, "/v1/chat/completions"),
+			Body:   body,
+			Header: headers,
+		}, nil
+	default:
+		return preparedUpstreamRequest{}, fmt.Errorf("unsupported upstream protocol: %s", protocol)
+	}
+}
+
+func prepareOpenAIImageGenerationRequest(channel *model.Channel, upstreamModelName string, requestBody map[string]interface{}) (preparedUpstreamRequest, error) {
+	upstreamModelName = strings.TrimSpace(upstreamModelName)
+	if upstreamModelName == "" {
+		return preparedUpstreamRequest{}, errors.New("model is required")
+	}
+
+	payload := make(map[string]interface{}, len(requestBody))
+	for key, value := range requestBody {
+		payload[key] = value
+	}
+	payload["model"] = upstreamModelName
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return preparedUpstreamRequest{}, err
+	}
+	headers := jsonHeaders()
+	headers.Set("Authorization", "Bearer "+strings.TrimSpace(channel.APIKey))
+	return preparedUpstreamRequest{
+		Method: http.MethodPost,
+		URL:    upstreamURLForRequest(channel.BaseURL, "/v1/images/generations"),
+		Body:   body,
+		Header: headers,
+	}, nil
+}
+
+func jsonHeaders() http.Header {
+	headers := http.Header{}
+	headers.Set("Content-Type", "application/json")
+	headers.Set("Accept", "application/json")
+	return headers
+}
+
+func withQueryParam(rawURL, key, value string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		separator := "?"
+		if strings.Contains(rawURL, "?") {
+			separator = "&"
+		}
+		return rawURL + separator + url.QueryEscape(key) + "=" + url.QueryEscape(value)
+	}
+	query := parsed.Query()
+	query.Set(key, value)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func channelProtocol(channelType string) proxyProtocol {
+	switch strings.ToLower(strings.TrimSpace(channelType)) {
+	case "completion", "completions", "chat_completion", "chat_completions", "openai", "newapi", "oneapi":
+		return protocolOpenAI
+	case "responses", "response", "openai_responses":
+		return protocolResponses
+	case "claude", "anthropic":
+		return protocolClaude
+	case "gemini", "google":
+		return protocolGemini
+	default:
+		return protocolOpenAI
+	}
+}
+
+func supportsOpenAIImageEndpoint(protocol proxyProtocol) bool {
+	return protocol == protocolOpenAI || protocol == protocolResponses
+}
+
+func normalizeProviderRequest(protocol proxyProtocol, path string, requestBody map[string]interface{}, modelName string) normalizedAIRequest {
+	switch protocol {
+	case protocolClaude:
+		return normalizeClaudeRequest(requestBody, modelName)
+	case protocolGemini:
+		return normalizeGeminiRequest(requestBody, modelName)
+	default:
+		return normalizeOpenAIRequest(path, requestBody, modelName)
+	}
+}
+
+func normalizeOpenAIRequest(path string, requestBody map[string]interface{}, modelName string) normalizedAIRequest {
+	normalized := normalizedAIRequest{
+		Model:       modelName,
+		MaxTokens:   intFromRequest(requestBody, "max_tokens", "max_completion_tokens"),
+		Temperature: floatPtrFromRequest(requestBody, "temperature"),
+		Stream:      isStreamingRequest(requestBody),
+	}
+	if isResponsesPath(path) {
+		input := normalizeResponsesInput(requestBody["input"])
+		for _, item := range input {
+			addNormalizedMessage(&normalized, responseInputRole(stringFromValue(item["role"])), contentToText(item["content"]))
+		}
+		return normalized
+	}
+	if messages, ok := requestBody["messages"].([]interface{}); ok {
+		for _, raw := range messages {
+			item, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			addNormalizedMessage(&normalized, stringFromValue(item["role"]), contentToText(item["content"]))
+		}
+		return normalized
+	}
+	if prompt := contentToText(requestBody["prompt"]); strings.TrimSpace(prompt) != "" {
+		addNormalizedMessage(&normalized, "user", prompt)
+	}
+	return normalized
+}
+
+func normalizeClaudeRequest(requestBody map[string]interface{}, modelName string) normalizedAIRequest {
+	normalized := normalizedAIRequest{
+		Model:       modelName,
+		System:      contentToText(requestBody["system"]),
+		MaxTokens:   intFromRequest(requestBody, "max_tokens"),
+		Temperature: floatPtrFromRequest(requestBody, "temperature"),
+		Stream:      isStreamingRequest(requestBody),
+	}
+	if messages, ok := requestBody["messages"].([]interface{}); ok {
+		for _, raw := range messages {
+			item, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			addNormalizedMessage(&normalized, stringFromValue(item["role"]), contentToText(item["content"]))
+		}
+	}
+	return normalized
+}
+
+func normalizeGeminiRequest(requestBody map[string]interface{}, modelName string) normalizedAIRequest {
+	normalized := normalizedAIRequest{Model: modelName}
+	if config, ok := requestBody["generationConfig"].(map[string]interface{}); ok {
+		normalized.MaxTokens = intFromRequest(config, "maxOutputTokens")
+		normalized.Temperature = floatPtrFromRequest(config, "temperature")
+	}
+	normalized.System = geminiSystemInstructionText(requestBody["systemInstruction"])
+	if contents, ok := requestBody["contents"].([]interface{}); ok {
+		for _, raw := range contents {
+			item, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			role := "user"
+			if strings.EqualFold(stringFromValue(item["role"]), "model") {
+				role = "assistant"
+			}
+			addNormalizedMessage(&normalized, role, geminiPartsText(item["parts"]))
+		}
+	} else if text := contentToText(requestBody["contents"]); strings.TrimSpace(text) != "" {
+		addNormalizedMessage(&normalized, "user", text)
+	}
+	return normalized
+}
+
+func addNormalizedMessage(request *normalizedAIRequest, role string, content string) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "system", "developer":
+		if request.System != "" {
+			request.System += "\n"
+		}
+		request.System += content
+	case "assistant", "model":
+		request.Messages = append(request.Messages, normalizedAIMessage{Role: "assistant", Content: content})
+	default:
+		request.Messages = append(request.Messages, normalizedAIMessage{Role: "user", Content: content})
+	}
+}
+
+func openAIChatCompletionsPayload(request normalizedAIRequest) ([]byte, error) {
+	messages := make([]map[string]interface{}, 0, len(request.Messages)+1)
+	if strings.TrimSpace(request.System) != "" {
+		messages = append(messages, map[string]interface{}{"role": "system", "content": request.System})
+	}
+	for _, message := range request.Messages {
+		messages = append(messages, map[string]interface{}{"role": message.Role, "content": message.Content})
+	}
+	if len(messages) == 0 {
+		return nil, errors.New("messages are required")
+	}
+	payload := map[string]interface{}{
+		"model":    request.Model,
+		"messages": messages,
+	}
+	if request.MaxTokens > 0 {
+		payload["max_tokens"] = request.MaxTokens
+	}
+	if request.Temperature != nil {
+		payload["temperature"] = *request.Temperature
+	}
+	if request.Stream {
+		payload["stream"] = true
+	}
+	return json.Marshal(payload)
+}
+
+func openAIResponsesPayload(request normalizedAIRequest) ([]byte, error) {
+	input := make([]map[string]interface{}, 0, len(request.Messages)+1)
+	if strings.TrimSpace(request.System) != "" {
+		input = append(input, map[string]interface{}{"role": "system", "content": request.System})
+	}
+	for _, message := range request.Messages {
+		input = append(input, map[string]interface{}{"role": message.Role, "content": message.Content})
+	}
+	if len(input) == 0 {
+		return nil, errors.New("input is required")
+	}
+	payload := map[string]interface{}{
+		"model": request.Model,
+		"input": input,
+	}
+	if request.MaxTokens > 0 {
+		payload["max_output_tokens"] = request.MaxTokens
+	}
+	if request.Temperature != nil {
+		payload["temperature"] = *request.Temperature
+	}
+	if request.Stream {
+		payload["stream"] = true
+	}
+	return json.Marshal(payload)
+}
+
+func claudeMessagesPayload(request normalizedAIRequest) ([]byte, error) {
+	messages := make([]map[string]interface{}, 0, len(request.Messages))
+	for _, message := range request.Messages {
+		role := "user"
+		if message.Role == "assistant" {
+			role = "assistant"
+		}
+		messages = append(messages, map[string]interface{}{"role": role, "content": message.Content})
+	}
+	if len(messages) == 0 {
+		return nil, errors.New("messages are required")
+	}
+	maxTokens := request.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 1024
+	}
+	payload := map[string]interface{}{
+		"model":      request.Model,
+		"max_tokens": maxTokens,
+		"messages":   messages,
+	}
+	if strings.TrimSpace(request.System) != "" {
+		payload["system"] = request.System
+	}
+	if request.Temperature != nil {
+		payload["temperature"] = *request.Temperature
+	}
+	return json.Marshal(payload)
+}
+
+func geminiGenerateContentPayload(request normalizedAIRequest) ([]byte, error) {
+	contents := make([]map[string]interface{}, 0, len(request.Messages))
+	for _, message := range request.Messages {
+		role := "user"
+		if message.Role == "assistant" {
+			role = "model"
+		}
+		contents = append(contents, map[string]interface{}{
+			"role":  role,
+			"parts": []map[string]string{{"text": message.Content}},
+		})
+	}
+	if len(contents) == 0 {
+		return nil, errors.New("contents are required")
+	}
+	payload := map[string]interface{}{"contents": contents}
+	if strings.TrimSpace(request.System) != "" {
+		payload["systemInstruction"] = map[string]interface{}{
+			"parts": []map[string]string{{"text": request.System}},
+		}
+	}
+	generationConfig := map[string]interface{}{}
+	if request.MaxTokens > 0 {
+		generationConfig["maxOutputTokens"] = request.MaxTokens
+	}
+	if request.Temperature != nil {
+		generationConfig["temperature"] = *request.Temperature
+	}
+	if len(generationConfig) > 0 {
+		payload["generationConfig"] = generationConfig
+	}
+	return json.Marshal(payload)
+}
+
+func transformProviderResponse(body []byte, upstreamProtocol, clientProtocol proxyProtocol, responses bool, modelName string) ([]byte, error) {
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+	data := providerResponseFromPayload(payload, upstreamProtocol)
+	switch clientProtocol {
+	case protocolOpenAI:
+		if responses {
+			return json.Marshal(openAIResponsesBody(data, modelName))
+		}
+		return json.Marshal(openAIChatBody(data, modelName))
+	case protocolResponses:
+		return json.Marshal(openAIResponsesBody(data, modelName))
+	case protocolClaude:
+		return json.Marshal(claudeResponseBody(data, modelName))
+	case protocolGemini:
+		return json.Marshal(geminiResponseBody(data, modelName))
+	default:
+		return nil, fmt.Errorf("unsupported client protocol: %s", clientProtocol)
+	}
+}
+
+func providerResponseFromPayload(payload map[string]interface{}, protocol proxyProtocol) providerResponseData {
+	switch protocol {
+	case protocolClaude:
+		return providerResponseFromClaude(payload)
+	case protocolGemini:
+		return providerResponseFromGemini(payload)
+	default:
+		return providerResponseFromOpenAI(payload)
+	}
+}
+
+func providerResponseFromOpenAI(payload map[string]interface{}) providerResponseData {
+	usage, _ := parseUsageTokens(payload)
+	return providerResponseData{
+		ID:                      stringFromValue(payload["id"]),
+		Text:                    openAIResponseText(payload),
+		InputTokens:             usage.InputTokens,
+		OutputTokens:            usage.OutputTokens,
+		CachedInputTokens:       usage.CachedInputTokens,
+		CacheWriteInputTokens:   usage.CacheWriteInputTokens,
+		CacheWrite1hInputTokens: usage.CacheWrite1hInputTokens,
+		ImageInputTokens:        usage.ImageInputTokens,
+		ImageOutputTokens:       usage.ImageOutputTokens,
+		AudioInputTokens:        usage.AudioInputTokens,
+		AudioOutputTokens:       usage.AudioOutputTokens,
+	}
+}
+
+func providerResponseFromClaude(payload map[string]interface{}) providerResponseData {
+	usage, _ := parseUsageTokens(payload)
+	parts := []string{}
+	if content, ok := payload["content"].([]interface{}); ok {
+		for _, raw := range content {
+			if item, ok := raw.(map[string]interface{}); ok {
+				if text := contentToText(item); strings.TrimSpace(text) != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+	}
+	return providerResponseData{
+		ID:                      stringFromValue(payload["id"]),
+		Text:                    strings.TrimSpace(strings.Join(parts, "\n")),
+		InputTokens:             usage.InputTokens,
+		OutputTokens:            usage.OutputTokens,
+		CachedInputTokens:       usage.CachedInputTokens,
+		CacheWriteInputTokens:   usage.CacheWriteInputTokens,
+		CacheWrite1hInputTokens: usage.CacheWrite1hInputTokens,
+		ImageInputTokens:        usage.ImageInputTokens,
+		ImageOutputTokens:       usage.ImageOutputTokens,
+		AudioInputTokens:        usage.AudioInputTokens,
+		AudioOutputTokens:       usage.AudioOutputTokens,
+	}
+}
+
+func providerResponseFromGemini(payload map[string]interface{}) providerResponseData {
+	usage, _ := parseUsageTokens(payload)
+	parts := []string{}
+	if candidates, ok := payload["candidates"].([]interface{}); ok {
+		for _, rawCandidate := range candidates {
+			candidate, ok := rawCandidate.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			content, ok := candidate["content"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if text := geminiPartsText(content["parts"]); strings.TrimSpace(text) != "" {
+				parts = append(parts, text)
+			}
+		}
+	}
+	return providerResponseData{
+		Text:                    strings.TrimSpace(strings.Join(parts, "\n")),
+		InputTokens:             usage.InputTokens,
+		OutputTokens:            usage.OutputTokens,
+		CachedInputTokens:       usage.CachedInputTokens,
+		CacheWriteInputTokens:   usage.CacheWriteInputTokens,
+		CacheWrite1hInputTokens: usage.CacheWrite1hInputTokens,
+		ImageInputTokens:        usage.ImageInputTokens,
+		ImageOutputTokens:       usage.ImageOutputTokens,
+		AudioInputTokens:        usage.AudioInputTokens,
+		AudioOutputTokens:       usage.AudioOutputTokens,
+	}
+}
+
+func openAIChatBody(data providerResponseData, modelName string) map[string]interface{} {
+	return map[string]interface{}{
+		"id":      fallbackID(data.ID, "chatcmpl"),
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   modelName,
+		"choices": []map[string]interface{}{{
+			"index":         0,
+			"finish_reason": "stop",
+			"message": map[string]interface{}{
+				"role":    "assistant",
+				"content": data.Text,
+			},
+		}},
+		"usage": openAIUsage(data),
+	}
+}
+
+func openAIResponsesBody(data providerResponseData, modelName string) map[string]interface{} {
+	return map[string]interface{}{
+		"id":          fallbackID(data.ID, "resp"),
+		"object":      "response",
+		"created_at":  time.Now().Unix(),
+		"model":       modelName,
+		"output_text": data.Text,
+		"output": []map[string]interface{}{{
+			"type": "message",
+			"role": "assistant",
+			"content": []map[string]interface{}{{
+				"type": "output_text",
+				"text": data.Text,
+			}},
+		}},
+		"usage": map[string]interface{}{
+			"input_tokens":  data.InputTokens,
+			"output_tokens": data.OutputTokens,
+			"total_tokens":  data.InputTokens + data.OutputTokens,
+			"input_tokens_details": map[string]interface{}{
+				"cached_tokens": data.CachedInputTokens,
+				"image_tokens":  data.ImageInputTokens,
+				"audio_tokens":  data.AudioInputTokens,
+			},
+			"output_tokens_details": map[string]interface{}{
+				"image_tokens": data.ImageOutputTokens,
+				"audio_tokens": data.AudioOutputTokens,
+			},
+			"cache_creation_input_tokens":    data.CacheWriteInputTokens,
+			"cache_creation_1h_input_tokens": data.CacheWrite1hInputTokens,
+		},
+	}
+}
+
+func claudeResponseBody(data providerResponseData, modelName string) map[string]interface{} {
+	return map[string]interface{}{
+		"id":            fallbackID(data.ID, "msg"),
+		"type":          "message",
+		"role":          "assistant",
+		"model":         modelName,
+		"stop_reason":   "end_turn",
+		"stop_sequence": nil,
+		"content": []map[string]interface{}{{
+			"type": "text",
+			"text": data.Text,
+		}},
+		"usage": map[string]interface{}{
+			"input_tokens":                   providerDataNonCacheInput(data),
+			"cache_read_input_tokens":        data.CachedInputTokens,
+			"cache_creation_input_tokens":    data.CacheWriteInputTokens,
+			"cache_creation_1h_input_tokens": data.CacheWrite1hInputTokens,
+			"output_tokens":                  data.OutputTokens,
+		},
+	}
+}
+
+func geminiResponseBody(data providerResponseData, modelName string) map[string]interface{} {
+	return map[string]interface{}{
+		"candidates": []map[string]interface{}{{
+			"content": map[string]interface{}{
+				"role":  "model",
+				"parts": []map[string]string{{"text": data.Text}},
+			},
+			"finishReason": "STOP",
+			"index":        0,
+		}},
+		"usageMetadata": map[string]interface{}{
+			"promptTokenCount":        data.InputTokens,
+			"cachedContentTokenCount": data.CachedInputTokens,
+			"candidatesTokenCount":    data.OutputTokens,
+			"totalTokenCount":         data.InputTokens + data.OutputTokens,
+			"promptTokensDetails": map[string]interface{}{
+				"imageTokens": data.ImageInputTokens,
+				"audioTokens": data.AudioInputTokens,
+			},
+			"candidatesTokensDetails": map[string]interface{}{
+				"imageTokens": data.ImageOutputTokens,
+				"audioTokens": data.AudioOutputTokens,
+			},
+		},
+		"modelVersion": modelName,
+	}
+}
+
+func openAIUsage(data providerResponseData) map[string]interface{} {
+	return map[string]interface{}{
+		"prompt_tokens":     data.InputTokens,
+		"completion_tokens": data.OutputTokens,
+		"total_tokens":      data.InputTokens + data.OutputTokens,
+		"prompt_tokens_details": map[string]interface{}{
+			"cached_tokens": data.CachedInputTokens,
+			"image_tokens":  data.ImageInputTokens,
+			"audio_tokens":  data.AudioInputTokens,
+		},
+		"completion_tokens_details": map[string]interface{}{
+			"image_tokens": data.ImageOutputTokens,
+			"audio_tokens": data.AudioOutputTokens,
+		},
+		"cache_creation_input_tokens":    data.CacheWriteInputTokens,
+		"cache_creation_1h_input_tokens": data.CacheWrite1hInputTokens,
+	}
+}
+
+func providerDataNonCacheInput(data providerResponseData) int {
+	tokens := data.InputTokens - data.CachedInputTokens - data.CacheWriteInputTokens - data.CacheWrite1hInputTokens
+	if tokens < 0 {
+		return 0
+	}
+	return tokens
+}
+
+func imageUsageTokenCounts(modelName string, requestBody map[string]interface{}, responseData map[string]interface{}) usageTokenCounts {
+	if responseData != nil {
+		if usage, ok := parseUsageTokens(responseData); ok {
+			return usage
+		}
+		if usage, ok := parseImageTotalUsageTokens(responseData); ok {
+			return usage
+		}
+	}
+	return estimateImageUsageTokens(modelName, requestBody, responseData)
+}
+
+func parseImageTotalUsageTokens(responseData map[string]interface{}) (usageTokenCounts, bool) {
+	usage, ok := responseData["usage"].(map[string]interface{})
+	if !ok {
+		return usageTokenCounts{}, false
+	}
+
+	inputTokens, inputOK := firstTokenValue(usage, "prompt_tokens", "input_tokens", "inputTokens")
+	outputTokens, outputOK := firstTokenValue(usage, "completion_tokens", "output_tokens", "outputTokens", "image_tokens", "imageTokens")
+	totalTokens, totalOK := firstTokenValue(usage, "total_tokens", "totalTokens")
+	if !outputOK && totalOK {
+		if inputOK {
+			outputTokens = totalTokens - inputTokens
+			if outputTokens < 0 {
+				outputTokens = 0
+			}
+		} else {
+			outputTokens = totalTokens
+		}
+		outputOK = true
+	}
+	if !inputOK && totalOK && outputOK {
+		inputTokens = totalTokens - outputTokens
+		if inputTokens < 0 {
+			inputTokens = 0
+		}
+		inputOK = true
+	}
+
+	if !outputOK && !totalOK {
+		return usageTokenCounts{}, false
+	}
+	return normalizeUsageTokenCounts(usageTokenCounts{
+		InputTokens:          inputTokens,
+		OutputTokens:         outputTokens,
+		CachedInputTokens:    cachedInputTokensFromUsage(usage),
+		CacheReadInputTokens: cachedInputTokensFromUsage(usage),
+		ImageOutputTokens:    outputTokens,
+	}), true
+}
+
+func estimateImageUsageTokens(modelName string, requestBody map[string]interface{}, responseData map[string]interface{}) usageTokenCounts {
+	imageCount := imageCountFromPayloads(requestBody, responseData)
+	return usageTokenCounts{
+		InputTokens:       CountTokens(modelName, imageRequestText(requestBody)),
+		OutputTokens:      imageCount * 1000000,
+		ImageOutputTokens: imageCount * 1000000,
+	}
+}
+
+func imageCountFromPayloads(requestBody map[string]interface{}, responseData map[string]interface{}) int {
+	if responseData != nil {
+		if data, ok := responseData["data"].([]interface{}); ok && len(data) > 0 {
+			return len(data)
+		}
+	}
+	for _, key := range []string{"n", "num_images", "count"} {
+		if value, ok := tokenValueAsInt(requestBody[key]); ok && value > 0 {
+			return value
+		}
+	}
+	return 1
+}
+
+func imageRequestText(requestBody map[string]interface{}) string {
+	parts := []string{}
+	for _, key := range []string{"prompt", "negative_prompt", "input"} {
+		if text := contentToText(requestBody[key]); strings.TrimSpace(text) != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+func imageResponseText(responseData map[string]interface{}) string {
+	parts := []string{}
+	if data, ok := responseData["data"].([]interface{}); ok {
+		for _, raw := range data {
+			item, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			for _, key := range []string{"revised_prompt", "prompt"} {
+				if text := contentToText(item[key]); strings.TrimSpace(text) != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+func openAIResponseText(payload map[string]interface{}) string {
+	if text, ok := payload["output_text"].(string); ok {
+		return text
+	}
+	if choices, ok := payload["choices"].([]interface{}); ok && len(choices) > 0 {
+		if choice, ok := choices[0].(map[string]interface{}); ok {
+			if message, ok := choice["message"].(map[string]interface{}); ok {
+				if text := contentToText(message["content"]); strings.TrimSpace(text) != "" {
+					return text
+				}
+			}
+			if text := contentToText(choice["text"]); strings.TrimSpace(text) != "" {
+				return text
+			}
+		}
+	}
+	if output, ok := payload["output"].([]interface{}); ok {
+		parts := []string{}
+		for _, raw := range output {
+			if item, ok := raw.(map[string]interface{}); ok {
+				if text := contentToText(item["content"]); strings.TrimSpace(text) != "" {
+					parts = append(parts, text)
+				}
+				if text := contentToText(item["text"]); strings.TrimSpace(text) != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+		return strings.TrimSpace(strings.Join(parts, "\n"))
+	}
+	return ""
+}
+
+func fallbackID(id, prefix string) string {
+	id = strings.TrimSpace(id)
+	if id != "" {
+		return id
+	}
+	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+}
+
+func geminiModelAction(value string) (string, string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", "", false
+	}
+	parts := strings.SplitN(value, ":", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	modelName := strings.TrimSpace(strings.TrimPrefix(parts[0], "models/"))
+	action := strings.TrimSpace(parts[1])
+	return modelName, action, modelName != "" && action != ""
+}
+
+func geminiSystemInstructionText(raw interface{}) string {
+	if item, ok := raw.(map[string]interface{}); ok {
+		if text := geminiPartsText(item["parts"]); strings.TrimSpace(text) != "" {
+			return text
+		}
+	}
+	return contentToText(raw)
+}
+
+func geminiPartsText(raw interface{}) string {
+	parts, ok := raw.([]interface{})
+	if !ok {
+		return contentToText(raw)
+	}
+	texts := make([]string, 0, len(parts))
+	for _, rawPart := range parts {
+		if text := contentToText(rawPart); strings.TrimSpace(text) != "" {
+			texts = append(texts, text)
+		}
+	}
+	return strings.Join(texts, "\n")
+}
+
+func intFromRequest(values map[string]interface{}, keys ...string) int {
+	for _, key := range keys {
+		if value, ok := tokenValueAsInt(values[key]); ok {
+			return value
+		}
+	}
+	return 0
+}
+
+func floatPtrFromRequest(values map[string]interface{}, keys ...string) *float64 {
+	for _, key := range keys {
+		switch value := values[key].(type) {
+		case float64:
+			return &value
+		case json.Number:
+			parsed, err := value.Float64()
+			if err == nil {
+				return &parsed
+			}
+		}
+	}
+	return nil
+}
+
+func stringFromValue(value interface{}) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return ""
+}
+
+func writeJSONProxyResponse(c *gin.Context, status int, body []byte) {
+	c.Header("Content-Type", "application/json")
+	c.Writer.WriteHeader(status)
+	_, _ = c.Writer.Write(body)
+}
+
+func logUpstreamRequestFailure(c *gin.Context, channel *model.Channel, upstreamURL string, body []byte, err error) {
+	log.Printf(
+		"upstream request failed: method=%s path=%s channel_id=%d upstream_url=%s request_body=%s error=%v",
+		c.Request.Method,
+		c.Request.URL.RequestURI(),
+		channel.ID,
+		redactedUpstreamURL(upstreamURL),
+		redactedRequestBodyPreview(body),
+		err,
+	)
+}
+
+func logUpstreamError(c *gin.Context, channel *model.Channel, upstreamURL string, status int, requestBody []byte, responseBody []byte) {
+	log.Printf(
+		"upstream returned error: method=%s path=%s channel_id=%d upstream_url=%s status=%d request_body=%s response_body=%q",
+		c.Request.Method,
+		c.Request.URL.RequestURI(),
+		channel.ID,
+		redactedUpstreamURL(upstreamURL),
+		status,
+		redactedRequestBodyPreview(requestBody),
+		proxyBodyPreview(responseBody, 1000),
+	)
+}
+
+func redactedUpstreamURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	query := parsed.Query()
+	for _, key := range []string{"key", "api_key", "access_token"} {
+		if query.Has(key) {
+			query.Set(key, "<redacted>")
+		}
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func isResponsesPath(path string) bool {
+	return strings.HasSuffix(strings.TrimRight(path, "/"), "/responses")
+}
+
+func normalizeResponsesRequest(requestBody map[string]interface{}) {
+	if input, exists := requestBody["input"]; exists {
+		requestBody["input"] = normalizeResponsesInput(input)
+	} else {
+		if messages, ok := requestBody["messages"].([]interface{}); ok {
+			requestBody["input"] = messagesToResponsesInput(messages)
+		}
+	}
+	delete(requestBody, "messages")
+}
+
+func normalizeResponsesInput(input interface{}) []map[string]interface{} {
+	switch value := input.(type) {
+	case []interface{}:
+		items := make([]map[string]interface{}, 0, len(value))
+		for _, raw := range value {
+			if item, ok := responseInputItem(raw); ok {
+				items = append(items, item)
+			}
+		}
+		return items
+	case string:
+		if strings.TrimSpace(value) == "" {
+			return []map[string]interface{}{}
+		}
+		return []map[string]interface{}{{"role": "user", "content": value}}
+	default:
+		text := contentToText(value)
+		if strings.TrimSpace(text) == "" {
+			return []map[string]interface{}{}
+		}
+		return []map[string]interface{}{{"role": "user", "content": text}}
+	}
+}
+
+func messagesToResponsesInput(messages []interface{}) []map[string]interface{} {
+	items := make([]map[string]interface{}, 0, len(messages))
+	for _, raw := range messages {
+		item, ok := responseInputItem(raw)
+		if !ok {
+			continue
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+func responseInputItem(raw interface{}) (map[string]interface{}, bool) {
+	item, ok := raw.(map[string]interface{})
+	if !ok {
+		text := contentToText(raw)
+		if strings.TrimSpace(text) == "" {
+			return nil, false
+		}
+		return map[string]interface{}{"role": "user", "content": text}, true
+	}
+	role, _ := item["role"].(string)
+	content := contentToText(item["content"])
+	if strings.TrimSpace(content) == "" {
+		content = contentToText(item["text"])
+	}
+	if strings.TrimSpace(content) == "" {
+		return nil, false
+	}
+	return map[string]interface{}{"role": responseInputRole(role), "content": content}, true
+}
+
+func responseInputRole(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "assistant":
+		return "assistant"
+	case "system":
+		return "system"
+	case "developer":
+		return "developer"
+	default:
+		return "user"
+	}
+}
+
+func contentToText(raw interface{}) string {
+	switch value := raw.(type) {
+	case string:
+		return value
+	case []interface{}:
+		parts := make([]string, 0, len(value))
+		for _, item := range value {
+			if text := contentToText(item); strings.TrimSpace(text) != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	case map[string]interface{}:
+		if text, ok := value["text"].(string); ok {
+			return text
+		}
+		if text, ok := value["content"].(string); ok {
+			return text
+		}
+	}
+	return ""
+}
+
+func redactedRequestBodyPreview(body []byte) string {
+	var payload interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return proxyBodyPreview(body, 1000)
+	}
+	redacted := redactRequestPayload(payload)
+	encoded, err := json.Marshal(redacted)
+	if err != nil {
+		return "<unavailable>"
+	}
+	return proxyBodyPreview(encoded, 1000)
+}
+
+func redactRequestPayload(value interface{}) interface{} {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		next := make(map[string]interface{}, len(typed))
+		for key, item := range typed {
+			lowerKey := strings.ToLower(key)
+			switch lowerKey {
+			case "content", "text", "input", "prompt", "negative_prompt", "image", "mask":
+				next[key] = redactTextLikeValue(item)
+			default:
+				next[key] = redactRequestPayload(item)
+			}
+		}
+		return next
+	case []interface{}:
+		next := make([]interface{}, 0, len(typed))
+		for _, item := range typed {
+			next = append(next, redactRequestPayload(item))
+		}
+		return next
+	default:
+		return typed
+	}
+}
+
+func redactTextLikeValue(value interface{}) interface{} {
+	switch typed := value.(type) {
+	case string:
+		return fmt.Sprintf("<text len=%d>", len([]rune(typed)))
+	case []interface{}:
+		next := make([]interface{}, 0, len(typed))
+		for _, item := range typed {
+			next = append(next, redactRequestPayload(item))
+		}
+		return next
+	default:
+		return redactRequestPayload(typed)
+	}
+}
+
+func proxyBodyPreview(body []byte, limit int) string {
+	preview := strings.TrimSpace(string(body))
+	preview = strings.Join(strings.Fields(preview), " ")
+	if limit <= 0 {
+		limit = 1000
+	}
+	if len(preview) > limit {
+		return preview[:limit] + "..."
+	}
+	return preview
+}
+
+func parseUsageTokens(responseData map[string]interface{}) (usageTokenCounts, bool) {
+	usage, ok := responseData["usage"].(map[string]interface{})
+	if !ok {
+		if usageMetadata, ok := responseData["usageMetadata"].(map[string]interface{}); ok {
+			inputTokens, inputOK := firstTokenValue(usageMetadata, "promptTokenCount", "prompt_token_count", "inputTokenCount", "input_token_count")
+			outputTokens, outputOK := firstTokenValue(usageMetadata, "candidatesTokenCount", "candidates_token_count", "outputTokenCount", "output_token_count")
+			cachedInputTokens, _ := firstTokenValue(usageMetadata, "cachedContentTokenCount", "cached_content_token_count", "cachedInputTokenCount", "cached_input_token_count")
+			return normalizeUsageTokenCounts(usageTokenCounts{
+				InputTokens:          inputTokens,
+				OutputTokens:         outputTokens,
+				CachedInputTokens:    cachedInputTokens,
+				CacheReadInputTokens: cachedInputTokens,
+			}), inputOK && outputOK
+		}
+		if response, ok := responseData["response"].(map[string]interface{}); ok {
+			return parseUsageTokens(response)
+		}
+		return usageTokenCounts{}, false
+	}
+
+	inputTokens, inputOK := firstTokenValue(usage, "prompt_tokens", "input_tokens", "inputTokens")
+	outputTokens, outputOK := firstTokenValue(usage, "completion_tokens", "output_tokens", "outputTokens")
+	cacheReadTokens := cachedInputTokensFromUsage(usage)
+	explicitCacheReadOK := false
+
+	if explicitCacheReadTokens, ok := firstTokenValue(usage, "cache_read_input_tokens", "cacheReadInputTokens", "cache_read_tokens", "cacheReadTokens"); ok {
+		cacheReadTokens = explicitCacheReadTokens
+		explicitCacheReadOK = true
+	}
+	cacheWriteTokens, cacheWriteOK := cacheWriteInputTokensFromUsage(usage)
+	cacheWrite1hTokens, cacheWrite1hOK := cacheWrite1hInputTokensFromUsage(usage)
+	if explicitCacheReadOK || cacheWriteOK || cacheWrite1hOK {
+		inputTokens += cacheReadTokens + cacheWriteTokens + cacheWrite1hTokens
+	}
+
+	imageInputTokens := inputModalityTokensFromUsage(usage, "image")
+	imageOutputTokens := outputModalityTokensFromUsage(usage, "image")
+	audioInputTokens := inputModalityTokensFromUsage(usage, "audio")
+	audioOutputTokens := outputModalityTokensFromUsage(usage, "audio")
+
+	return normalizeUsageTokenCounts(usageTokenCounts{
+		InputTokens:             inputTokens,
+		OutputTokens:            outputTokens,
+		CachedInputTokens:       cacheReadTokens,
+		CacheReadInputTokens:    cacheReadTokens,
+		CacheWriteInputTokens:   cacheWriteTokens,
+		CacheWrite1hInputTokens: cacheWrite1hTokens,
+		ImageInputTokens:        imageInputTokens,
+		ImageOutputTokens:       imageOutputTokens,
+		AudioInputTokens:        audioInputTokens,
+		AudioOutputTokens:       audioOutputTokens,
+	}), inputOK && outputOK
+}
+
+func cachedInputTokensFromUsage(usage map[string]interface{}) int {
+	if cachedInputTokens, ok := firstTokenValue(usage, "cached_input_tokens", "cachedInputTokens", "cached_tokens", "cachedTokens"); ok {
+		return cachedInputTokens
+	}
+	for _, key := range []string{"prompt_tokens_details", "promptTokensDetails", "input_tokens_details", "inputTokensDetails", "input_token_details", "inputTokenDetails"} {
+		if details, ok := usage[key].(map[string]interface{}); ok {
+			if cachedInputTokens, ok := firstTokenValue(details, "cached_tokens", "cachedTokens", "cached_input_tokens", "cachedInputTokens", "cache_read", "cacheRead", "cache_read_input_tokens", "cacheReadInputTokens"); ok {
+				return cachedInputTokens
+			}
+		}
+	}
+	return 0
+}
+
+func cacheWriteInputTokensFromUsage(usage map[string]interface{}) (int, bool) {
+	if tokens, ok := firstTokenValue(usage,
+		"cache_write_input_tokens", "cacheWriteInputTokens",
+		"cache_creation_input_tokens", "cacheCreationInputTokens",
+		"cache_write_5m_input_tokens", "cacheWrite5mInputTokens",
+		"cache_creation_5m_input_tokens", "cacheCreation5mInputTokens",
+	); ok {
+		return tokens, true
+	}
+	if cacheCreation, ok := usage["cache_creation"].(map[string]interface{}); ok {
+		if tokens, ok := firstTokenValue(cacheCreation,
+			"ephemeral_5m_input_tokens", "ephemeral5mInputTokens",
+			"cache_write_5m_input_tokens", "cacheWrite5mInputTokens",
+			"input_tokens", "inputTokens",
+		); ok {
+			return tokens, true
+		}
+	}
+	return 0, false
+}
+
+func cacheWrite1hInputTokensFromUsage(usage map[string]interface{}) (int, bool) {
+	if tokens, ok := firstTokenValue(usage,
+		"cache_write_1h_input_tokens", "cacheWrite1hInputTokens",
+		"cache_creation_1h_input_tokens", "cacheCreation1hInputTokens",
+		"cache_write_1_hour_input_tokens", "cacheWrite1HourInputTokens",
+		"cache_creation_1_hour_input_tokens", "cacheCreation1HourInputTokens",
+	); ok {
+		return tokens, true
+	}
+	if cacheCreation, ok := usage["cache_creation"].(map[string]interface{}); ok {
+		if tokens, ok := firstTokenValue(cacheCreation,
+			"ephemeral_1h_input_tokens", "ephemeral1hInputTokens",
+			"ephemeral_1_hour_input_tokens", "ephemeral1HourInputTokens",
+			"cache_write_1h_input_tokens", "cacheWrite1hInputTokens",
+		); ok {
+			return tokens, true
+		}
+	}
+	return 0, false
+}
+
+func inputModalityTokensFromUsage(usage map[string]interface{}, modality string) int {
+	keys := modalityTokenKeys(modality, "input")
+	if tokens, ok := firstTokenValue(usage, keys...); ok {
+		return tokens
+	}
+	if tokens, ok := firstTokenValueFromUsageDetails(usage, inputTokenDetailKeys(), modalityTokenKeys(modality, "")...); ok {
+		return tokens
+	}
+	return 0
+}
+
+func outputModalityTokensFromUsage(usage map[string]interface{}, modality string) int {
+	keys := modalityTokenKeys(modality, "output")
+	if tokens, ok := firstTokenValue(usage, keys...); ok {
+		return tokens
+	}
+	if tokens, ok := firstTokenValueFromUsageDetails(usage, outputTokenDetailKeys(), modalityTokenKeys(modality, "")...); ok {
+		return tokens
+	}
+	return 0
+}
+
+func inputTokenDetailKeys() []string {
+	return []string{"prompt_tokens_details", "promptTokensDetails", "input_tokens_details", "inputTokensDetails", "input_token_details", "inputTokenDetails"}
+}
+
+func outputTokenDetailKeys() []string {
+	return []string{"completion_tokens_details", "completionTokensDetails", "output_tokens_details", "outputTokensDetails", "output_token_details", "outputTokenDetails"}
+}
+
+func modalityTokenKeys(modality string, direction string) []string {
+	switch strings.ToLower(strings.TrimSpace(modality)) {
+	case "image":
+		switch direction {
+		case "input":
+			return []string{"image_input_tokens", "imageInputTokens", "input_image_tokens", "inputImageTokens", "prompt_image_tokens", "promptImageTokens"}
+		case "output":
+			return []string{"image_output_tokens", "imageOutputTokens", "output_image_tokens", "outputImageTokens", "completion_image_tokens", "completionImageTokens", "image_tokens", "imageTokens"}
+		default:
+			return []string{"image_tokens", "imageTokens", "image_input_tokens", "imageInputTokens", "input_image_tokens", "inputImageTokens"}
+		}
+	case "audio":
+		switch direction {
+		case "input":
+			return []string{"audio_input_tokens", "audioInputTokens", "input_audio_tokens", "inputAudioTokens", "prompt_audio_tokens", "promptAudioTokens"}
+		case "output":
+			return []string{"audio_output_tokens", "audioOutputTokens", "output_audio_tokens", "outputAudioTokens", "completion_audio_tokens", "completionAudioTokens", "audio_tokens", "audioTokens"}
+		default:
+			return []string{"audio_tokens", "audioTokens", "audio_input_tokens", "audioInputTokens", "input_audio_tokens", "inputAudioTokens"}
+		}
+	default:
+		return nil
+	}
+}
+
+func firstTokenValueFromUsageDetails(usage map[string]interface{}, detailKeys []string, tokenKeys ...string) (int, bool) {
+	for _, key := range detailKeys {
+		if details, ok := usage[key].(map[string]interface{}); ok {
+			if tokens, ok := firstTokenValue(details, tokenKeys...); ok {
+				return tokens, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func normalizeUsageTokenCounts(usage usageTokenCounts) usageTokenCounts {
+	if usage.InputTokens < 0 {
+		usage.InputTokens = 0
+	}
+	if usage.OutputTokens < 0 {
+		usage.OutputTokens = 0
+	}
+	if usage.CachedInputTokens < 0 {
+		usage.CachedInputTokens = 0
+	}
+	if usage.CacheReadInputTokens < 0 {
+		usage.CacheReadInputTokens = 0
+	}
+	if usage.CacheWriteInputTokens < 0 {
+		usage.CacheWriteInputTokens = 0
+	}
+	if usage.CacheWrite1hInputTokens < 0 {
+		usage.CacheWrite1hInputTokens = 0
+	}
+	if usage.ImageInputTokens < 0 {
+		usage.ImageInputTokens = 0
+	}
+	if usage.ImageOutputTokens < 0 {
+		usage.ImageOutputTokens = 0
+	}
+	if usage.AudioInputTokens < 0 {
+		usage.AudioInputTokens = 0
+	}
+	if usage.AudioOutputTokens < 0 {
+		usage.AudioOutputTokens = 0
+	}
+	if usage.CacheReadInputTokens == 0 && usage.CachedInputTokens > 0 {
+		usage.CacheReadInputTokens = usage.CachedInputTokens
+	}
+	if usage.CachedInputTokens == 0 && usage.CacheReadInputTokens > 0 {
+		usage.CachedInputTokens = usage.CacheReadInputTokens
+	}
+	minInputTokens := usage.CacheReadInputTokens + usage.CacheWriteInputTokens + usage.CacheWrite1hInputTokens
+	if usage.ImageInputTokens+usage.AudioInputTokens > minInputTokens {
+		minInputTokens = usage.ImageInputTokens + usage.AudioInputTokens
+	}
+	if minInputTokens > usage.InputTokens {
+		usage.InputTokens = minInputTokens
+	}
+	if usage.ImageOutputTokens+usage.AudioOutputTokens > usage.OutputTokens {
+		usage.OutputTokens = usage.ImageOutputTokens + usage.AudioOutputTokens
+	}
+	return usage
+}
+
+func firstTokenValue(usage map[string]interface{}, keys ...string) (int, bool) {
+	for _, key := range keys {
+		if value, ok := tokenValueAsInt(usage[key]); ok {
+			return value, true
+		}
+	}
+	return 0, false
+}
+
+func tokenValueAsInt(value interface{}) (int, bool) {
+	switch v := value.(type) {
+	case float64:
+		if v < 0 {
+			return 0, false
+		}
+		return int(v), true
+	case int:
+		if v < 0 {
+			return 0, false
+		}
+		return v, true
+	case json.Number:
+		parsed, err := v.Int64()
+		if err != nil || parsed < 0 {
+			return 0, false
+		}
+		return int(parsed), true
+	default:
+		return 0, false
+	}
+}
+
+func shouldSkipProxyHeader(key string) bool {
+	switch strings.ToLower(key) {
+	case "authorization", "connection", "content-length", "host", "keep-alive", "proxy-authenticate",
+		"proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldSkipProxyResponseHeader(key string, streaming bool) bool {
+	switch strings.ToLower(key) {
+	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
+		"transfer-encoding", "upgrade":
+		return true
+	case "content-length":
+		return streaming
+	default:
+		return false
+	}
+}

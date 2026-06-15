@@ -1,0 +1,601 @@
+package app
+
+import (
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
+	"io/fs"
+	"mime"
+	"net/http"
+	"net/url"
+	"path"
+	"strings"
+	"time"
+
+	"github.com/WindyPear-Team/flai/internal/api"
+	"github.com/WindyPear-Team/flai/internal/config"
+	"github.com/WindyPear-Team/flai/internal/middleware"
+	"github.com/WindyPear-Team/flai/internal/model"
+	"github.com/WindyPear-Team/flai/internal/service"
+	webui "github.com/WindyPear-Team/flai/web"
+	"github.com/gin-gonic/gin"
+)
+
+func Run() error {
+	// Initialize config
+	config.Init()
+
+	// Initialize database
+	model.InitDB()
+
+	// Services
+	authService, err := service.NewAuthService()
+	if err != nil {
+		return err
+	}
+	proxyService := service.NewProxyService()
+	syncService := service.NewSyncService()
+	statusService := service.NewStatusService()
+	rateLimiter := middleware.NewRateLimiter()
+
+	// Start sync loop
+	syncService.StartSyncLoop()
+	statusService.Start()
+
+	// Initialize Gin
+	r := gin.Default()
+	r.Use(requestBodyLimit(maxRequestBodyBytes))
+	frontendFS, err := webui.DistFS()
+	if err != nil {
+		return err
+	}
+
+	// APIs
+	channelAPI := &api.ChannelAPI{SyncService: syncService}
+	userChannelAPI := &api.UserChannelAPI{}
+	modelAPI := &api.ModelAPI{SyncService: syncService}
+	userAPI := &api.UserAPI{AuthService: authService}
+	statsAPI := &api.StatsAPI{}
+	groupAPI := &api.GroupAPI{}
+	systemAPI := &api.SystemAPI{}
+	redeemCodeAPI := &api.RedeemCodeAPI{}
+	referralAPI := &api.ReferralAPI{}
+	statusMonitorAPI := &api.StatusMonitorAPI{StatusService: statusService}
+	checkInAPI := &api.CheckInAPI{}
+	paymentAPI := &api.PaymentAPI{}
+	passkeyAPI := &api.PasskeyAPI{AuthService: authService}
+
+	// Public routes
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(200, gin.H{"status": "ok"})
+	})
+	r.GET("/api/public/settings", systemAPI.PublicSettings)
+	r.GET("/api/public/models", modelAPI.PublicCatalog)
+	r.GET("/api/public/status", statusMonitorAPI.PublicStatus)
+	r.GET("/api/pricing", modelAPI.Pricing)
+	r.GET("/api/payment/yipay/return", paymentAPI.Return)
+	r.GET("/api/payment/yipay/notify", paymentAPI.Notify)
+	r.POST("/api/payment/yipay/notify", paymentAPI.Notify)
+	r.GET("/api/setup/status", func(c *gin.Context) {
+		required, err := authService.InitialSetupRequired()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load setup status"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"required": required})
+	})
+	r.POST("/api/setup", func(c *gin.Context) {
+		var input struct {
+			SiteName string `json:"site_name"`
+			Username string `json:"username"`
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		user, token, err := authService.SetupInitialAdmin(service.InitialSetupInput{
+			SiteName: input.SiteName,
+			Username: input.Username,
+			Email:    input.Email,
+			Password: input.Password,
+		})
+		if err != nil {
+			switch {
+			case errors.Is(err, service.ErrInitialSetupComplete):
+				c.JSON(http.StatusConflict, gin.H{"error": "Initial setup is already complete"})
+			case service.IsInitialSetupValidationError(err):
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			default:
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to complete initial setup"})
+			}
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"token": token, "user": user})
+	})
+
+	// OIDC Auth routes
+	auth := r.Group("/auth")
+	{
+		auth.POST("/password/login", func(c *gin.Context) {
+			var input struct {
+				Identifier   string `json:"identifier"`
+				Password     string `json:"password"`
+				CaptchaToken string `json:"captcha_token"`
+			}
+			if err := c.ShouldBindJSON(&input); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			user, token, err := authService.LoginWithPassword(service.PasswordLoginInput{
+				Identifier:   input.Identifier,
+				Password:     input.Password,
+				CaptchaToken: input.CaptchaToken,
+			})
+			if err != nil {
+				writeAuthError(c, err)
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"token": token, "user": user})
+		})
+		auth.POST("/password/register", func(c *gin.Context) {
+			var input struct {
+				Username     string `json:"username"`
+				Email        string `json:"email"`
+				Password     string `json:"password"`
+				EmailCode    string `json:"email_code"`
+				CaptchaToken string `json:"captcha_token"`
+				ReferralCode string `json:"referral_code"`
+			}
+			if err := c.ShouldBindJSON(&input); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			if input.ReferralCode == "" {
+				input.ReferralCode = getReferralCookie(c)
+			}
+			user, token, err := authService.RegisterWithPassword(service.PasswordRegisterInput{
+				Username:     input.Username,
+				Email:        input.Email,
+				Password:     input.Password,
+				EmailCode:    input.EmailCode,
+				CaptchaToken: input.CaptchaToken,
+				ReferralCode: input.ReferralCode,
+			})
+			if err != nil {
+				writeAuthError(c, err)
+				return
+			}
+			clearReferralCookie(c)
+			c.JSON(http.StatusOK, gin.H{"token": token, "user": user})
+		})
+		auth.POST("/password/email-code", func(c *gin.Context) {
+			var input struct {
+				Email        string `json:"email"`
+				CaptchaToken string `json:"captcha_token"`
+			}
+			if err := c.ShouldBindJSON(&input); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			if err := authService.SendRegistrationEmailCode(input.Email, input.CaptchaToken); err != nil {
+				writeAuthError(c, err)
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"message": "Verification code sent"})
+		})
+		auth.POST("/passkey/login/options", passkeyAPI.BeginLogin)
+		auth.POST("/passkey/login", passkeyAPI.CompleteLogin)
+		auth.GET("/login", func(c *gin.Context) {
+			if required, err := authService.InitialSetupRequired(); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load setup status"})
+				return
+			} else if required {
+				c.JSON(http.StatusConflict, gin.H{"error": "Initial setup is required"})
+				return
+			}
+			if referralCode := model.NormalizeReferralCode(c.Query("ref")); referralCode != "" {
+				setReferralCookie(c, referralCode, 30*24*60*60)
+			}
+			state, err := newOIDCState()
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to initialize login"})
+				return
+			}
+
+			authURL, err := authService.GetAuthURL(c.Request.Context(), state)
+			if err != nil {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+				return
+			}
+			if authURL == "" {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OIDC is not configured"})
+				return
+			}
+
+			setOIDCStateCookie(c, state, 600)
+			setOIDCReturnCookie(c, authReturnURL(c), 600)
+			c.Redirect(http.StatusFound, authURL)
+		})
+		auth.GET("/callback", func(c *gin.Context) {
+			code := c.Query("code")
+			state := c.Query("state")
+			expectedState, err := c.Cookie(oidcStateCookie)
+			returnTo := getOIDCReturnURL(c)
+			clearOIDCStateCookie(c)
+			clearOIDCReturnCookie(c)
+			if err != nil || state == "" || state != expectedState {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid OIDC state"})
+				return
+			}
+			if code == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Missing authorization code"})
+				return
+			}
+
+			referralCode := getReferralCookie(c)
+			clearReferralCookie(c)
+			var token string
+			if _, ok, err := authService.OIDCBindRequest(state); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load OIDC bind request"})
+				return
+			} else if ok {
+				_, token, err = authService.HandleOIDCBindCallback(c.Request.Context(), code, state)
+			} else {
+				if required, setupErr := authService.InitialSetupRequired(); setupErr != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load setup status"})
+					return
+				} else if required {
+					c.JSON(http.StatusConflict, gin.H{"error": "Initial setup is required"})
+					return
+				}
+				_, token, err = authService.HandleCallback(c.Request.Context(), code, referralCode)
+			}
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			// Redirect back to frontend with token in fragment to avoid server logs.
+			c.Redirect(http.StatusFound, frontendTokenRedirectURL(returnTo, token))
+		})
+	}
+
+	// AI Gateway routes (Proxy)
+	gateway := r.Group("/v1")
+	gateway.Use(middleware.AuthMiddleware(authService), rateLimiter.Middleware())
+	{
+		gateway.GET("/models", proxyService.ListModels)
+		gateway.POST("/chat/completions", proxyService.HandleRequest)
+		gateway.POST("/completions", proxyService.HandleRequest)
+		gateway.POST("/responses", proxyService.HandleRequest)
+		gateway.POST("/images/generations", proxyService.HandleImageGeneration)
+		gateway.POST("/messages", proxyService.HandleClaudeMessages)
+		gateway.POST("/models/:modelAction", proxyService.HandleGeminiGenerateContent)
+	}
+
+	geminiGateway := r.Group("/v1beta")
+	geminiGateway.Use(middleware.AuthMiddleware(authService), rateLimiter.Middleware())
+	{
+		geminiGateway.POST("/models/:modelAction", proxyService.HandleGeminiGenerateContent)
+	}
+
+	// Admin/Dashboard APIs
+	admin := r.Group("/api")
+	admin.Use(middleware.AuthMiddleware(authService), middleware.AdminMiddleware())
+	{
+		// System settings
+		admin.GET("/settings", systemAPI.GetSettings)
+		admin.PUT("/settings", systemAPI.UpdateSettings)
+		admin.GET("/status-monitors", statusMonitorAPI.List)
+		admin.POST("/status-monitors", statusMonitorAPI.Create)
+		admin.PUT("/status-monitors/:id", statusMonitorAPI.Update)
+		admin.DELETE("/status-monitors/:id", statusMonitorAPI.Delete)
+		admin.POST("/status-monitors/:id/check", statusMonitorAPI.CheckNow)
+
+		// Channels
+		admin.GET("/channels", channelAPI.List)
+		admin.POST("/channels", channelAPI.Create)
+		admin.PUT("/channels/:id", channelAPI.Update)
+		admin.PUT("/channels/:id/group-multipliers", channelAPI.SetGroupMultipliers)
+		admin.GET("/channels/:id/models", modelAPI.ListChannelModels)
+		admin.POST("/channels/:id/models", modelAPI.CreateChannelModel)
+		admin.DELETE("/channels/:id", channelAPI.Delete)
+		admin.POST("/channels/sync", channelAPI.Sync)
+
+		// Global models and upstream channel model configs
+		admin.GET("/models", modelAPI.List)
+		admin.POST("/models", modelAPI.Create)
+		admin.POST("/models/sync", modelAPI.Sync)
+		admin.POST("/models/sync/preview", modelAPI.PreviewSync)
+		admin.POST("/models/sync/preview/browser", modelAPI.PreviewSyncFromBrowser)
+		admin.POST("/models/sync/apply", modelAPI.ApplySync)
+		admin.POST("/models/prices/sync/preview", modelAPI.PreviewPriceSync)
+		admin.POST("/models/prices/sync/preview/browser", modelAPI.PreviewPriceSyncFromBrowser)
+		admin.POST("/models/prices/sync/apply", modelAPI.ApplyPriceSync)
+		admin.PUT("/models/:id", modelAPI.Update)
+		admin.DELETE("/models/:id", modelAPI.Delete)
+		admin.PUT("/channel-models/:id", modelAPI.UpdateChannelModel)
+		admin.PUT("/channel-models/:id/group-multipliers", modelAPI.SetGroupMultipliers)
+		admin.DELETE("/channel-models/:id", modelAPI.DeleteChannelModel)
+
+		// User-facing channels
+		admin.GET("/user-channels", userChannelAPI.List)
+		admin.POST("/user-channels", userChannelAPI.Create)
+		admin.PUT("/user-channels/:id", userChannelAPI.Update)
+		admin.DELETE("/user-channels/:id", userChannelAPI.Delete)
+
+		// Groups
+		admin.GET("/groups", groupAPI.List)
+		admin.POST("/groups", groupAPI.Create)
+		admin.PUT("/groups/:id", groupAPI.Update)
+		admin.DELETE("/groups/:id", groupAPI.Delete)
+
+		// Users
+		admin.GET("/users", userAPI.List)
+		admin.PUT("/users/:id", userAPI.Update)
+		admin.DELETE("/users/:id", userAPI.Delete)
+		admin.GET("/redeem-codes", redeemCodeAPI.List)
+		admin.POST("/redeem-codes", redeemCodeAPI.Create)
+		admin.PUT("/redeem-codes/:id", redeemCodeAPI.Update)
+		admin.DELETE("/redeem-codes/:id", redeemCodeAPI.Delete)
+		admin.GET("/referral-commissions", referralAPI.ListCommissions)
+
+		// Stats
+		admin.GET("/logs", statsAPI.GetLogs)
+		admin.GET("/stats", statsAPI.GetDashboardStats)
+		admin.GET("/channel-usage", statsAPI.GetChannelUsage)
+	}
+
+	// User Self APIs
+	userGroup := r.Group("/api/user")
+	userGroup.Use(middleware.AuthMiddleware(authService))
+	{
+		userGroup.GET("/me", userAPI.GetMe)
+		userGroup.GET("/catalog", userChannelAPI.Catalog)
+		userGroup.GET("/stats", statsAPI.GetUserDashboardStats)
+		userGroup.GET("/logs", statsAPI.GetUserLogs)
+		userGroup.POST("/redeem-code", redeemCodeAPI.Redeem)
+		userGroup.GET("/referral", referralAPI.GetMine)
+		userGroup.GET("/check-in/status", checkInAPI.Status)
+		userGroup.POST("/check-in", checkInAPI.Claim)
+		userGroup.GET("/payment/config", paymentAPI.Config)
+		userGroup.POST("/payment/orders", paymentAPI.CreateOrder)
+		userGroup.GET("/payment/orders/:order_no", paymentAPI.GetOrder)
+		userGroup.GET("/passkeys", passkeyAPI.List)
+		userGroup.POST("/passkeys/register/options", passkeyAPI.BeginRegistration)
+		userGroup.POST("/passkeys/register", passkeyAPI.CompleteRegistration)
+		userGroup.DELETE("/passkeys/:id", passkeyAPI.Delete)
+		userGroup.GET("/password/method", userAPI.PasswordChangeMethod)
+		userGroup.POST("/password/email-code", userAPI.SendPasswordChangeEmailCode)
+		userGroup.POST("/password/change", userAPI.ChangePassword)
+		userGroup.POST("/oidc/bind-url", func(c *gin.Context) {
+			val, exists := c.Get("user")
+			if !exists {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+				return
+			}
+			user, ok := val.(*model.User)
+			if !ok || user == nil {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+				return
+			}
+			state, err := newOIDCState()
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to initialize OIDC binding"})
+				return
+			}
+			authURL, err := authService.CreateOIDCBindRequest(c.Request.Context(), user.ID, state)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			setOIDCStateCookie(c, state, 600)
+			c.JSON(http.StatusOK, gin.H{"auth_url": authURL})
+		})
+		userGroup.GET("/api-keys", userAPI.ListAPIKeys)
+		userGroup.POST("/api-keys", userAPI.CreateAPIKey)
+		userGroup.PUT("/api-keys/:id", userAPI.UpdateAPIKey)
+		userGroup.DELETE("/api-keys/:id", userAPI.DeleteAPIKey)
+		userGroup.POST("/api-key/rotate", userAPI.RotateAPIKey)
+	}
+
+	// Serve embedded frontend assets from web/dist.
+	assetsFS, err := fs.Sub(frontendFS, "assets")
+	if err != nil {
+		return err
+	}
+	r.StaticFS("/assets", http.FS(assetsFS))
+	r.GET("/favicon.svg", embeddedFileHandler(frontendFS, "favicon.svg"))
+	r.GET("/icons.svg", embeddedFileHandler(frontendFS, "icons.svg"))
+	r.NoRoute(func(c *gin.Context) {
+		// If the request starts with an API/auth prefix, it's a 404
+		path := c.Request.URL.Path
+		if hasRoutePrefix(path, "/api") || hasRoutePrefix(path, "/v1") || hasRoutePrefix(path, "/v1beta") || hasRoutePrefix(path, "/auth") {
+			c.JSON(404, gin.H{"error": "Not found"})
+			return
+		}
+		// Otherwise, serve index.html for SPA routing
+		serveEmbeddedFile(c, frontendFS, "index.html")
+	})
+
+	server := &http.Server{
+		Addr:              ":" + config.Port,
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	return server.ListenAndServe()
+}
+
+const oidcStateCookie = "flai_oidc_state"
+const oidcReturnCookie = "flai_oidc_return_to"
+const referralCookie = "flai_referral_code"
+const maxRequestBodyBytes int64 = 32 << 20
+
+func requestBodyLimit(maxBytes int64) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.Body != nil {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
+		}
+		c.Next()
+	}
+}
+
+func writeAuthError(c *gin.Context, err error) {
+	if errors.Is(err, service.ErrInitialSetupRequired) {
+		c.JSON(http.StatusConflict, gin.H{"error": "Initial setup is required"})
+		return
+	}
+	c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+}
+
+func embeddedFileHandler(fileSystem fs.FS, name string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		serveEmbeddedFile(c, fileSystem, name)
+	}
+}
+
+func serveEmbeddedFile(c *gin.Context, fileSystem fs.FS, name string) {
+	data, err := fs.ReadFile(fileSystem, name)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Not found"})
+		return
+	}
+	contentType := mime.TypeByExtension(path.Ext(name))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	c.Data(http.StatusOK, contentType, data)
+}
+
+func newOIDCState() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b[:]), nil
+}
+
+func setOIDCStateCookie(c *gin.Context, state string, maxAge int) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     oidcStateCookie,
+		Value:    state,
+		Path:     "/auth",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   c.Request.TLS != nil,
+	})
+}
+
+func clearOIDCStateCookie(c *gin.Context) {
+	setOIDCStateCookie(c, "", -1)
+}
+
+func setOIDCReturnCookie(c *gin.Context, returnTo string, maxAge int) {
+	if returnTo != "" {
+		returnTo = base64.RawURLEncoding.EncodeToString([]byte(returnTo))
+	}
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     oidcReturnCookie,
+		Value:    returnTo,
+		Path:     "/auth",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   c.Request.TLS != nil,
+	})
+}
+
+func getOIDCReturnURL(c *gin.Context) string {
+	value, err := c.Cookie(oidcReturnCookie)
+	if err != nil || value == "" {
+		return ""
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return ""
+	}
+	return string(decoded)
+}
+
+func clearOIDCReturnCookie(c *gin.Context) {
+	setOIDCReturnCookie(c, "", -1)
+}
+
+func setReferralCookie(c *gin.Context, code string, maxAge int) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     referralCookie,
+		Value:    code,
+		Path:     "/auth",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   c.Request.TLS != nil,
+	})
+}
+
+func getReferralCookie(c *gin.Context) string {
+	value, err := c.Cookie(referralCookie)
+	if err != nil {
+		return ""
+	}
+	return model.NormalizeReferralCode(value)
+}
+
+func clearReferralCookie(c *gin.Context) {
+	setReferralCookie(c, "", -1)
+}
+
+func authReturnURL(c *gin.Context) string {
+	if !config.IsDevelopmentLike(config.Environment) {
+		return ""
+	}
+	if origin := originFromURL(c.GetHeader("Referer")); origin != "" {
+		return origin
+	}
+	return originFromURL(c.GetHeader("Origin"))
+}
+
+func frontendTokenRedirectURL(returnTo, token string) string {
+	escapedToken := url.QueryEscape(token)
+	base := strings.TrimSpace(returnTo)
+	if base == "" {
+		return "/dashboard?token=" + escapedToken
+	}
+
+	parsed, err := url.Parse(base)
+	if err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		parsed.Path = strings.TrimRight(parsed.Path, "/") + "/dashboard"
+		parsed.RawQuery = "token=" + escapedToken
+		parsed.Fragment = ""
+		return parsed.String()
+	}
+
+	return strings.TrimRight(base, "/") + "/dashboard?token=" + escapedToken
+}
+
+func originFromURL(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return ""
+	}
+	if parsed.Host == "" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+func hasRoutePrefix(path, prefix string) bool {
+	return path == prefix || strings.HasPrefix(path, prefix+"/")
+}
