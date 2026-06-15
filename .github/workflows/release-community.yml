@@ -1,0 +1,107 @@
+name: Release Community
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  WEB_REPOSITORY: WindyPear-Team/windypear-api-frontend
+
+jobs:
+  build:
+    name: ${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            ext: ""
+            archive: tar.gz
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+            archive: zip
+          - goos: windows
+            goarch: arm64
+            ext: ".exe"
+            archive: zip
+          - goos: darwin
+            goarch: amd64
+            ext: ""
+            archive: tar.gz
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+            archive: tar.gz
+
+    steps:
+      - name: Checkout community
+        uses: actions/checkout@v4
+        with:
+          path: community
+          fetch-depth: 0
+
+      - name: Checkout shared web
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.WEB_REPOSITORY }}
+          ref: ${{ github.ref_name }}
+          path: web
+          token: ${{ secrets.CHECKOUT_TOKEN || github.token }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: community/go.mod
+          cache-dependency-path: community/go.sum
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: yarn
+          cache-dependency-path: web/yarn.lock
+
+      - name: Build shared web
+        working-directory: web
+        run: |
+          corepack enable
+          yarn install --immutable
+          yarn build
+
+      - name: Build community binary
+        working-directory: community
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p ../out
+          go build -buildvcs=false -trimpath -ldflags="-s -w" -o "../out/flai-community-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
+
+      - name: Package artifact
+        working-directory: out
+        run: |
+          name="flai-community-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          binary="${name}${{ matrix.ext }}"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            zip "${name}.zip" "${binary}"
+          else
+            tar -czf "${name}.tar.gz" "${binary}"
+          fi
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/flai-community-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
