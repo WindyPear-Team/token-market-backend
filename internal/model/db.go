@@ -45,6 +45,7 @@ func InitDB() {
 		&ModelConfig{},
 		&StatusMonitor{},
 		&StatusCheck{},
+		&Announcement{},
 		&SystemSetting{},
 		&TokenLog{},
 	)
@@ -312,6 +313,8 @@ func EnsureDefaultSystemSettings() error {
 		"top_nav_items":                   "",
 		"sidebar_dashboard_enabled":       "true",
 		"sidebar_usage_enabled":           "true",
+		"sidebar_wallet_enabled":          "true",
+		"sidebar_data_board_enabled":      "true",
 		"sidebar_api_keys_enabled":        "true",
 		"sidebar_chat_enabled":            "true",
 		"sidebar_images_enabled":          "true",

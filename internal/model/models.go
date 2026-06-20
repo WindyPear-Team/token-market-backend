@@ -298,6 +298,17 @@ type StatusCheck struct {
 	CreatedAt  time.Time     `json:"created_at"`
 }
 
+// Announcement stores dashboard announcements shown to users.
+type Announcement struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Title     string    `gorm:"size:120;not null" json:"title"`
+	Content   string    `gorm:"type:text;not null" json:"content"`
+	Enabled   bool      `gorm:"default:true" json:"enabled"`
+	SortOrder int       `gorm:"default:0" json:"sort_order"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // SystemSetting stores global UI and platform configuration.
 type SystemSetting struct {
 	Key       string    `gorm:"primaryKey;size:100" json:"key"`

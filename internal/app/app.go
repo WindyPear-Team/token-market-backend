@@ -63,6 +63,7 @@ func Run() error {
 	systemAPI := &api.SystemAPI{}
 	referralAPI := &api.ReferralAPI{}
 	statusMonitorAPI := &api.StatusMonitorAPI{StatusService: statusService}
+	announcementAPI := &api.AnnouncementAPI{}
 	checkInAPI := &api.CheckInAPI{}
 	paymentAPI := &api.PaymentAPI{}
 	passkeyAPI := &api.PasskeyAPI{AuthService: authService}
@@ -74,6 +75,7 @@ func Run() error {
 	r.GET("/api/public/settings", systemAPI.PublicSettings)
 	r.GET("/api/public/models", modelAPI.PublicCatalog)
 	r.GET("/api/public/status", statusMonitorAPI.PublicStatus)
+	r.GET("/api/public/announcements", announcementAPI.PublicList)
 	r.GET("/api/pricing", modelAPI.Pricing)
 	r.GET("/api/payment/yipay/return", paymentAPI.Return)
 	r.GET("/api/payment/yipay/notify", paymentAPI.Notify)
@@ -299,6 +301,10 @@ func Run() error {
 		admin.PUT("/status-monitors/:id", statusMonitorAPI.Update)
 		admin.DELETE("/status-monitors/:id", statusMonitorAPI.Delete)
 		admin.POST("/status-monitors/:id/check", statusMonitorAPI.CheckNow)
+		admin.GET("/announcements", announcementAPI.List)
+		admin.POST("/announcements", announcementAPI.Create)
+		admin.PUT("/announcements/:id", announcementAPI.Update)
+		admin.DELETE("/announcements/:id", announcementAPI.Delete)
 
 		// Channels
 		admin.GET("/channels", channelAPI.List)

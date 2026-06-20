@@ -35,6 +35,8 @@ type systemSettingsResponse struct {
 	TopNavItems                  string `json:"top_nav_items"`
 	SidebarDashboardEnabled      bool   `json:"sidebar_dashboard_enabled"`
 	SidebarUsageEnabled          bool   `json:"sidebar_usage_enabled"`
+	SidebarWalletEnabled         bool   `json:"sidebar_wallet_enabled"`
+	SidebarDataBoardEnabled      bool   `json:"sidebar_data_board_enabled"`
 	SidebarAPIKeysEnabled        bool   `json:"sidebar_api_keys_enabled"`
 	SidebarChatEnabled           bool   `json:"sidebar_chat_enabled"`
 	SidebarImagesEnabled         bool   `json:"sidebar_images_enabled"`
@@ -118,6 +120,8 @@ type systemSettingsInput struct {
 	TopNavItems                  *string `json:"top_nav_items"`
 	SidebarDashboardEnabled      *bool   `json:"sidebar_dashboard_enabled"`
 	SidebarUsageEnabled          *bool   `json:"sidebar_usage_enabled"`
+	SidebarWalletEnabled         *bool   `json:"sidebar_wallet_enabled"`
+	SidebarDataBoardEnabled      *bool   `json:"sidebar_data_board_enabled"`
 	SidebarAPIKeysEnabled        *bool   `json:"sidebar_api_keys_enabled"`
 	SidebarChatEnabled           *bool   `json:"sidebar_chat_enabled"`
 	SidebarImagesEnabled         *bool   `json:"sidebar_images_enabled"`
@@ -282,6 +286,8 @@ func (api *SystemAPI) UpdateSettings(c *gin.Context) {
 		"top_nav_enabled":                input.TopNavEnabled,
 		"sidebar_dashboard_enabled":      input.SidebarDashboardEnabled,
 		"sidebar_usage_enabled":          input.SidebarUsageEnabled,
+		"sidebar_wallet_enabled":         input.SidebarWalletEnabled,
+		"sidebar_data_board_enabled":     input.SidebarDataBoardEnabled,
 		"sidebar_api_keys_enabled":       input.SidebarAPIKeysEnabled,
 		"sidebar_chat_enabled":           input.SidebarChatEnabled,
 		"sidebar_images_enabled":         input.SidebarImagesEnabled,
@@ -338,6 +344,8 @@ func currentPublicSystemSettings() systemSettingsResponse {
 		TopNavItems:                 settingString("top_nav_items", ""),
 		SidebarDashboardEnabled:     settingBool("sidebar_dashboard_enabled", true),
 		SidebarUsageEnabled:         settingBool("sidebar_usage_enabled", true),
+		SidebarWalletEnabled:        settingBool("sidebar_wallet_enabled", true),
+		SidebarDataBoardEnabled:     settingBool("sidebar_data_board_enabled", true),
 		SidebarAPIKeysEnabled:       settingBool("sidebar_api_keys_enabled", true),
 		SidebarChatEnabled:          settingBool("sidebar_chat_enabled", true),
 		SidebarImagesEnabled:        settingBool("sidebar_images_enabled", true),
@@ -435,6 +443,115 @@ func settingBool(key string, fallback bool) bool {
 	default:
 		return fallback
 	}
+}
+
+// AnnouncementAPI handles user-facing announcements.
+type AnnouncementAPI struct{}
+
+type announcementInput struct {
+	Title     string `json:"title"`
+	Content   string `json:"content"`
+	Enabled   *bool  `json:"enabled"`
+	SortOrder int    `json:"sort_order"`
+}
+
+func (api *AnnouncementAPI) PublicList(c *gin.Context) {
+	var announcements []model.Announcement
+	if err := model.DB.Where("enabled = ?", true).
+		Order("sort_order ASC").
+		Order("created_at DESC").
+		Find(&announcements).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list announcements"})
+		return
+	}
+	c.JSON(http.StatusOK, announcements)
+}
+
+func (api *AnnouncementAPI) List(c *gin.Context) {
+	var announcements []model.Announcement
+	if err := model.DB.Order("sort_order ASC").Order("created_at DESC").Find(&announcements).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list announcements"})
+		return
+	}
+	c.JSON(http.StatusOK, announcements)
+}
+
+func (api *AnnouncementAPI) Create(c *gin.Context) {
+	announcement, ok := bindAnnouncementInput(c)
+	if !ok {
+		return
+	}
+	if err := model.DB.Create(&announcement).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create announcement"})
+		return
+	}
+	c.JSON(http.StatusOK, announcement)
+}
+
+func (api *AnnouncementAPI) Update(c *gin.Context) {
+	var announcement model.Announcement
+	if err := model.DB.First(&announcement, c.Param("id")).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Announcement not found"})
+		return
+	}
+	next, ok := bindAnnouncementInput(c)
+	if !ok {
+		return
+	}
+	announcement.Title = next.Title
+	announcement.Content = next.Content
+	announcement.Enabled = next.Enabled
+	announcement.SortOrder = next.SortOrder
+	if err := model.DB.Save(&announcement).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update announcement"})
+		return
+	}
+	c.JSON(http.StatusOK, announcement)
+}
+
+func (api *AnnouncementAPI) Delete(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 0)
+	if err != nil || id == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid announcement id"})
+		return
+	}
+	if err := model.DB.Delete(&model.Announcement{}, uint(id)).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete announcement"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Announcement deleted"})
+}
+
+func bindAnnouncementInput(c *gin.Context) (model.Announcement, bool) {
+	var input announcementInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return model.Announcement{}, false
+	}
+	title := strings.TrimSpace(input.Title)
+	content := strings.TrimSpace(input.Content)
+	if title == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Announcement title is required"})
+		return model.Announcement{}, false
+	}
+	if len([]rune(title)) > 120 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Announcement title is too long"})
+		return model.Announcement{}, false
+	}
+	if content == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Announcement content is required"})
+		return model.Announcement{}, false
+	}
+	enabled := true
+	if input.Enabled != nil {
+		enabled = *input.Enabled
+	}
+	return model.Announcement{
+		Title:     title,
+		Content:   content,
+		Enabled:   enabled,
+		SortOrder: input.SortOrder,
+	}, true
 }
 
 // StatusMonitorAPI handles public status-monitor configuration and output.
