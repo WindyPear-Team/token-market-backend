@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -59,11 +60,13 @@ const (
 )
 
 type proxyTarget struct {
-	User        *model.User
-	APIKey      *model.APIKey
-	ModelName   string
-	ModelConfig model.ModelConfig
-	Channel     model.Channel
+	User             *model.User
+	APIKey           *model.APIKey
+	ModelName        string
+	ModelConfig      model.ModelConfig
+	Channel          model.Channel
+	BillingModel     *model.Model
+	BillingModelName string
 }
 
 type normalizedAIRequest struct {
@@ -137,7 +140,14 @@ func (s *ProxyService) ListModels(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list models"})
 		return
 	}
+	if metaModelNames, err := ListMetaModelNames(c); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list meta models"})
+		return
+	} else if len(metaModelNames) > 0 {
+		modelNames = append(modelNames, metaModelNames...)
+	}
 	modelNames = filterModelsForAPIKey(modelNames, currentAPIKey(c))
+	modelNames = uniqueSortedModelNames(modelNames)
 
 	items := make([]modelListDataItem, 0, len(modelNames))
 	for _, name := range modelNames {
@@ -256,7 +266,7 @@ func (s *ProxyService) HandleImageGeneration(c *gin.Context) {
 	}
 
 	usage := imageUsageTokenCounts(target.ModelName, requestBody, responseData)
-	if status, message, err := s.billUsage(c, target.User, target.APIKey, &target.Channel, &target.ModelConfig, target.ModelName, usage); err != nil {
+	if status, message, err := s.billUsage(c, target.User, target.APIKey, &target.Channel, &target.ModelConfig, target.billingModelName(), usage, target.billingModel()); err != nil {
 		c.JSON(status, gin.H{"error": message})
 		return
 	}
@@ -316,9 +326,39 @@ func readProxyJSONBody(c *gin.Context) (map[string]interface{}, []byte, bool) {
 }
 
 func (s *ProxyService) handleConvertedProviderRequest(c *gin.Context, clientProtocol proxyProtocol, modelName string, requestBody map[string]interface{}, originalBody []byte) {
+	metaResolution, err := ResolveMetaModel(c, MetaModelResolveInput{
+		ModelName:    modelName,
+		RequestBody:  requestBody,
+		OriginalBody: originalBody,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to resolve meta model"})
+		return
+	}
+	if metaResolution.ErrorStatus != 0 {
+		c.JSON(metaResolution.ErrorStatus, gin.H{"error": metaResolution.ErrorMessage})
+		return
+	}
+	if metaResolution.Matched {
+		resolvedModelName := strings.TrimSpace(metaResolution.ModelName)
+		if resolvedModelName == "" {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Meta model did not resolve to a model"})
+			return
+		}
+		modelName = resolvedModelName
+		requestBody["model"] = resolvedModelName
+		if metaResolution.SkipAPIKeyModelCheck {
+			c.Set("skip_api_key_model_check", true)
+		}
+	}
+
 	target, ok := s.resolveTarget(c, modelName)
 	if !ok {
 		return
+	}
+	if metaResolution.Matched && metaResolution.BillingMode == "meta" && metaResolution.BillingModel != nil {
+		target.BillingModel = metaResolution.BillingModel
+		target.BillingModelName = metaResolution.BillingModel.ModelName
 	}
 
 	normalized := normalizeProviderRequest(clientProtocol, c.Request.URL.Path, requestBody, target.upstreamModelName())
@@ -380,7 +420,7 @@ func (s *ProxyService) handleConvertedProviderRequest(c *gin.Context, clientProt
 				OutputTokens: CountTokens(target.ModelName, string(respBody)),
 			}
 		}
-		if _, _, err := s.billUsage(c, target.User, target.APIKey, &target.Channel, &target.ModelConfig, target.ModelName, usage); err != nil {
+		if _, _, err := s.billUsage(c, target.User, target.APIKey, &target.Channel, &target.ModelConfig, target.billingModelName(), usage, target.billingModel()); err != nil {
 			log.Printf("failed to bill streaming usage for user=%d model=%s: %v", target.User.ID, target.ModelName, err)
 		}
 		return
@@ -404,7 +444,8 @@ func (s *ProxyService) resolveTarget(c *gin.Context, modelName string) (*proxyTa
 	}
 
 	apiKey := currentAPIKey(c)
-	if !APIKeyAllowsModel(apiKey, modelName) {
+	skipAPIKeyModelCheck, _ := c.Get("skip_api_key_model_check")
+	if skip, _ := skipAPIKeyModelCheck.(bool); !skip && !APIKeyAllowsModel(apiKey, modelName) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "API key is not allowed to use this model"})
 		return nil, false
 	}
@@ -470,6 +511,26 @@ func (target *proxyTarget) upstreamModelName() string {
 		return target.ModelName
 	}
 	return upstreamModelName
+}
+
+func (target *proxyTarget) billingModel() model.Model {
+	if target != nil && target.BillingModel != nil {
+		return *target.BillingModel
+	}
+	if target != nil {
+		return target.ModelConfig.Model
+	}
+	return model.Model{}
+}
+
+func (target *proxyTarget) billingModelName() string {
+	if target != nil && strings.TrimSpace(target.BillingModelName) != "" {
+		return strings.TrimSpace(target.BillingModelName)
+	}
+	if target != nil {
+		return target.ModelName
+	}
+	return ""
 }
 
 func (s *ProxyService) selectModelConfig(candidates []model.ModelConfig, modelName string) model.ModelConfig {
@@ -591,7 +652,7 @@ func (s *ProxyService) handleNonStreamingResponse(c *gin.Context, resp *http.Res
 			OutputTokens: CountTokens(target.ModelName, string(clientBody)),
 		}
 	}
-	if status, message, err := s.billUsage(c, target.User, target.APIKey, &target.Channel, &target.ModelConfig, target.ModelName, usage); err != nil {
+	if status, message, err := s.billUsage(c, target.User, target.APIKey, &target.Channel, &target.ModelConfig, target.billingModelName(), usage, target.billingModel()); err != nil {
 		c.JSON(status, gin.H{"error": message})
 		return
 	}
@@ -603,7 +664,7 @@ func (s *ProxyService) handleNonStreamingResponse(c *gin.Context, resp *http.Res
 	writeJSONProxyResponse(c, resp.StatusCode, clientBody)
 }
 
-func (s *ProxyService) billUsage(c *gin.Context, user *model.User, apiKey *model.APIKey, channel *model.Channel, modelConfig *model.ModelConfig, modelName string, usage usageTokenCounts) (int, string, error) {
+func (s *ProxyService) billUsage(c *gin.Context, user *model.User, apiKey *model.APIKey, channel *model.Channel, modelConfig *model.ModelConfig, modelName string, usage usageTokenCounts, billingModel model.Model) (int, string, error) {
 	groupMultiplier, err := effectiveUserGroupMultiplier(user, channel.ID, modelConfig.ID)
 	if err != nil {
 		return http.StatusInternalServerError, "User group not found", err
@@ -612,7 +673,7 @@ func (s *ProxyService) billUsage(c *gin.Context, user *model.User, apiKey *model
 
 	// Final cost calculation
 	// Prices are stored per 1M tokens.
-	cost := calculateModelUsageCost(usage, modelConfig.Model).
+	cost := calculateModelUsageCost(usage, billingModel).
 		Mul(groupMultiplier).
 		Mul(userChannelMultiplier(channel))
 
@@ -887,6 +948,24 @@ func filterModelsForAPIKey(modelNames []string, apiKey *model.APIKey) []string {
 		}
 	}
 	return filtered
+}
+
+func uniqueSortedModelNames(modelNames []string) []string {
+	seen := map[string]struct{}{}
+	unique := make([]string, 0, len(modelNames))
+	for _, name := range modelNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		unique = append(unique, name)
+	}
+	sort.Strings(unique)
+	return unique
 }
 
 func currentAPIKey(c *gin.Context) *model.APIKey {

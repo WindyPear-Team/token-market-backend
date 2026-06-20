@@ -1049,9 +1049,12 @@ type modelConfigInput struct {
 
 type publicModelCatalogItem struct {
 	ModelName                   string                   `json:"model_name"`
+	Description                 string                   `json:"description,omitempty"`
 	Provider                    string                   `json:"provider"`
 	ProviderName                string                   `json:"provider_name"`
 	ProviderIconURL             string                   `json:"provider_icon_url"`
+	IsMetaModel                 bool                     `json:"is_meta_model"`
+	MetaBillingMode             string                   `json:"meta_billing_mode,omitempty"`
 	InputPrice                  decimal.Decimal          `json:"input_price"`
 	OutputPrice                 decimal.Decimal          `json:"output_price"`
 	CachedInputPrice            decimal.Decimal          `json:"cached_input_price"`
@@ -1071,6 +1074,7 @@ type publicModelCatalogItem struct {
 	AudioInputPriceTiers        model.PriceTierList      `json:"audio_input_price_tiers"`
 	AudioOutputPriceTiers       model.PriceTierList      `json:"audio_output_price_tiers"`
 	UserChannels                []publicModelUserChannel `json:"user_channels"`
+	ReferencedModels            []publicModelCatalogItem `json:"referenced_models,omitempty"`
 }
 
 type publicModelUserChannel struct {
@@ -1439,23 +1443,172 @@ func (api *ModelAPI) PublicCatalog(c *gin.Context) {
 		}
 	}
 
+	if metaModels, err := service.ListMetaModelCatalog(c); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list meta models"})
+		return
+	} else {
+		addMetaModelCatalogItems(catalog, metaModels)
+	}
+
 	response := make([]publicModelCatalogItem, 0, len(catalog))
 	for _, item := range catalog {
-		channels := make([]publicModelUserChannel, 0, len(item.userChannelMap))
-		for _, channel := range item.userChannelMap {
-			channels = append(channels, *channel)
-		}
-		sort.Slice(channels, func(i, j int) bool {
-			return channels[i].Name < channels[j].Name
-		})
-		item.UserChannels = channels
-		response = append(response, item.publicModelCatalogItem)
+		response = append(response, catalogItemWithChannels(item))
 	}
 	sort.Slice(response, func(i, j int) bool {
 		return response[i].ModelName < response[j].ModelName
 	})
 
 	c.JSON(http.StatusOK, response)
+}
+
+func catalogItemWithChannels(item *publicModelCatalogAggregate) publicModelCatalogItem {
+	if item == nil {
+		return publicModelCatalogItem{}
+	}
+	channels := make([]publicModelUserChannel, 0, len(item.userChannelMap))
+	for _, channel := range item.userChannelMap {
+		channels = append(channels, *channel)
+	}
+	sort.Slice(channels, func(i, j int) bool {
+		return channels[i].Name < channels[j].Name
+	})
+	next := item.publicModelCatalogItem
+	next.UserChannels = channels
+	return next
+}
+
+func addMetaModelCatalogItems(catalog map[string]*publicModelCatalogAggregate, metaModels []service.MetaModelCatalogItem) {
+	for _, meta := range metaModels {
+		name := strings.TrimSpace(meta.Name)
+		if name == "" {
+			continue
+		}
+		referenced := referencedPublicCatalogItems(catalog, meta.ReferencedModels)
+		if len(referenced) == 0 {
+			continue
+		}
+		item := &publicModelCatalogAggregate{
+			publicModelCatalogItem: publicModelCatalogItem{
+				ModelName:        name,
+				Description:      strings.TrimSpace(meta.Description),
+				Provider:         "meta",
+				ProviderName:     "Meta Module",
+				IsMetaModel:      true,
+				MetaBillingMode:  strings.TrimSpace(meta.BillingMode),
+				ReferencedModels: referenced,
+				UserChannels:     []publicModelUserChannel{},
+			},
+			userChannelMap: map[uint]*publicModelUserChannel{},
+		}
+		if item.MetaBillingMode == "meta" {
+			item.InputPrice = meta.InputPrice
+			item.OutputPrice = meta.OutputPrice
+			item.CachedInputPrice = meta.CachedInputPrice
+			item.userChannelMap = metaBillingUserChannels(referenced, meta)
+		} else {
+			applyActualBillingMetaPrices(item, referenced)
+			item.userChannelMap = actualBillingUserChannels(referenced)
+		}
+		catalog[name] = item
+	}
+}
+
+func referencedPublicCatalogItems(catalog map[string]*publicModelCatalogAggregate, modelNames []string) []publicModelCatalogItem {
+	items := make([]publicModelCatalogItem, 0, len(modelNames))
+	seen := map[string]struct{}{}
+	for _, modelName := range modelNames {
+		modelName = strings.TrimSpace(modelName)
+		if modelName == "" {
+			continue
+		}
+		if _, exists := seen[modelName]; exists {
+			continue
+		}
+		seen[modelName] = struct{}{}
+		if item, exists := catalog[modelName]; exists {
+			ref := catalogItemWithChannels(item)
+			ref.ReferencedModels = nil
+			items = append(items, ref)
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].ModelName < items[j].ModelName
+	})
+	return items
+}
+
+func applyActualBillingMetaPrices(item *publicModelCatalogAggregate, referenced []publicModelCatalogItem) {
+	for index, ref := range referenced {
+		if index == 0 || ref.InputPrice.LessThan(item.InputPrice) {
+			item.InputPrice = ref.InputPrice
+			item.InputPriceTiers = ref.InputPriceTiers
+		}
+		if index == 0 || ref.OutputPrice.LessThan(item.OutputPrice) {
+			item.OutputPrice = ref.OutputPrice
+			item.OutputPriceTiers = ref.OutputPriceTiers
+		}
+		if index == 0 || ref.CachedInputPrice.LessThan(item.CachedInputPrice) {
+			item.CachedInputPrice = ref.CachedInputPrice
+			item.CachedInputPriceTiers = ref.CachedInputPriceTiers
+		}
+	}
+}
+
+func actualBillingUserChannels(referenced []publicModelCatalogItem) map[uint]*publicModelUserChannel {
+	channels := map[uint]*publicModelUserChannel{}
+	for _, ref := range referenced {
+		for _, channel := range ref.UserChannels {
+			existing := channels[channel.ID]
+			if existing == nil {
+				copy := channel
+				channels[channel.ID] = &copy
+				continue
+			}
+			if channel.EffectiveInputPrice.LessThan(existing.EffectiveInputPrice) {
+				existing.InputPrice = channel.InputPrice
+				existing.InputPriceTiers = channel.InputPriceTiers
+				existing.EffectiveInputPrice = channel.EffectiveInputPrice
+				existing.EffectiveInputPriceTiers = channel.EffectiveInputPriceTiers
+			}
+			if channel.EffectiveOutputPrice.LessThan(existing.EffectiveOutputPrice) {
+				existing.OutputPrice = channel.OutputPrice
+				existing.OutputPriceTiers = channel.OutputPriceTiers
+				existing.EffectiveOutputPrice = channel.EffectiveOutputPrice
+				existing.EffectiveOutputPriceTiers = channel.EffectiveOutputPriceTiers
+			}
+			if channel.EffectiveCachedInputPrice.LessThan(existing.EffectiveCachedInputPrice) {
+				existing.CachedInputPrice = channel.CachedInputPrice
+				existing.CachedInputPriceTiers = channel.CachedInputPriceTiers
+				existing.EffectiveCachedInputPrice = channel.EffectiveCachedInputPrice
+				existing.EffectiveCachedInputPriceTiers = channel.EffectiveCachedInputPriceTiers
+			}
+		}
+	}
+	return channels
+}
+
+func metaBillingUserChannels(referenced []publicModelCatalogItem, meta service.MetaModelCatalogItem) map[uint]*publicModelUserChannel {
+	channels := map[uint]*publicModelUserChannel{}
+	for _, ref := range referenced {
+		for _, channel := range ref.UserChannels {
+			if _, exists := channels[channel.ID]; exists {
+				continue
+			}
+			channels[channel.ID] = &publicModelUserChannel{
+				ID:                        channel.ID,
+				Name:                      channel.Name,
+				Description:               channel.Description,
+				Multiplier:                channel.Multiplier,
+				InputPrice:                meta.InputPrice,
+				OutputPrice:               meta.OutputPrice,
+				CachedInputPrice:          meta.CachedInputPrice,
+				EffectiveInputPrice:       meta.InputPrice.Mul(channel.Multiplier),
+				EffectiveOutputPrice:      meta.OutputPrice.Mul(channel.Multiplier),
+				EffectiveCachedInputPrice: meta.CachedInputPrice.Mul(channel.Multiplier),
+			}
+		}
+	}
+	return channels
 }
 
 func (api *ModelAPI) Pricing(c *gin.Context) {

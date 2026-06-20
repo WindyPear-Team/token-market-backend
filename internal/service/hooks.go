@@ -2,10 +2,13 @@ package service
 
 import (
 	"errors"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
+
+	"github.com/WindyPear-Team/flai/internal/model"
 )
 
 var ErrInsufficientBalance = errors.New("insufficient balance")
@@ -13,11 +16,43 @@ var ErrInsufficientBalance = errors.New("insufficient balance")
 type StartupHook func() error
 type RouteHook func(*gin.RouterGroup)
 type UsageChargeHook func(tx *gorm.DB, userID uint, cost decimal.Decimal) error
+type MetaModelListHook func(*gin.Context) ([]string, error)
+type MetaModelResolveHook func(*gin.Context, MetaModelResolveInput) (MetaModelResolveResult, error)
+type MetaModelCatalogHook func(*gin.Context) ([]MetaModelCatalogItem, error)
+
+type MetaModelResolveInput struct {
+	ModelName    string
+	RequestBody  map[string]interface{}
+	OriginalBody []byte
+}
+
+type MetaModelResolveResult struct {
+	Matched              bool
+	ModelName            string
+	BillingMode          string
+	BillingModel         *model.Model
+	SkipAPIKeyModelCheck bool
+	ErrorStatus          int
+	ErrorMessage         string
+}
+
+type MetaModelCatalogItem struct {
+	Name             string          `json:"name"`
+	Description      string          `json:"description"`
+	BillingMode      string          `json:"billing_mode"`
+	InputPrice       decimal.Decimal `json:"input_price"`
+	OutputPrice      decimal.Decimal `json:"output_price"`
+	CachedInputPrice decimal.Decimal `json:"cached_input_price"`
+	ReferencedModels []string        `json:"referenced_models"`
+}
 
 var startupHooks []StartupHook
 var adminRouteHooks []RouteHook
 var userRouteHooks []RouteHook
 var usageChargeHook UsageChargeHook
+var metaModelListHook MetaModelListHook
+var metaModelResolveHook MetaModelResolveHook
+var metaModelCatalogHook MetaModelCatalogHook
 
 func RegisterStartupHook(hook StartupHook) {
 	startupHooks = append(startupHooks, hook)
@@ -61,6 +96,40 @@ func ApplyUserRouteHooks(group *gin.RouterGroup) {
 
 func RegisterUsageChargeHook(hook UsageChargeHook) {
 	usageChargeHook = hook
+}
+
+func RegisterMetaModelHooks(listHook MetaModelListHook, resolveHook MetaModelResolveHook) {
+	metaModelListHook = listHook
+	metaModelResolveHook = resolveHook
+}
+
+func RegisterMetaModelCatalogHook(hook MetaModelCatalogHook) {
+	metaModelCatalogHook = hook
+}
+
+func ListMetaModelNames(c *gin.Context) ([]string, error) {
+	if metaModelListHook == nil {
+		return nil, nil
+	}
+	return metaModelListHook(c)
+}
+
+func ListMetaModelCatalog(c *gin.Context) ([]MetaModelCatalogItem, error) {
+	if metaModelCatalogHook == nil {
+		return nil, nil
+	}
+	return metaModelCatalogHook(c)
+}
+
+func ResolveMetaModel(c *gin.Context, input MetaModelResolveInput) (MetaModelResolveResult, error) {
+	if metaModelResolveHook == nil {
+		return MetaModelResolveResult{}, nil
+	}
+	result, err := metaModelResolveHook(c, input)
+	if result.ErrorStatus == 0 && result.ErrorMessage != "" {
+		result.ErrorStatus = http.StatusBadRequest
+	}
+	return result, err
 }
 
 func ApplyUsageCharge(tx *gorm.DB, userID uint, cost decimal.Decimal) error {
