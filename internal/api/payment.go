@@ -72,6 +72,7 @@ type paymentOrderResponse struct {
 	Method     string `json:"method"`
 	Status     string `json:"status"`
 	PaymentURL string `json:"payment_url,omitempty"`
+	CreatedAt  string `json:"created_at,omitempty"`
 	PaidAt     string `json:"paid_at,omitempty"`
 }
 
@@ -155,6 +156,24 @@ func (api *PaymentAPI) CreateOrder(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
+func (api *PaymentAPI) ListOrders(c *gin.Context) {
+	user, ok := currentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	var orders []model.PaymentOrder
+	if err := model.DB.Where("user_id = ?", user.ID).Order("created_at DESC").Limit(100).Find(&orders).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load payment orders"})
+		return
+	}
+	response := make([]paymentOrderResponse, 0, len(orders))
+	for _, order := range orders {
+		response = append(response, toPaymentOrderResponse(order))
+	}
+	c.JSON(http.StatusOK, response)
+}
+
 func (api *PaymentAPI) GetOrder(c *gin.Context) {
 	user, ok := currentUser(c)
 	if !ok {
@@ -189,7 +208,7 @@ func (api *PaymentAPI) Return(c *gin.Context) {
 		status = "success"
 	}
 	orderNo := firstNonEmptyString(strings.TrimSpace(c.Query("out_trade_no")), strings.TrimSpace(c.Query("merchant_order_no")))
-	c.Redirect(http.StatusFound, "/dashboard/settings?payment="+url.QueryEscape(status)+"&order_no="+url.QueryEscape(orderNo))
+	c.Redirect(http.StatusFound, "/dashboard/wallet?payment="+url.QueryEscape(status)+"&order_no="+url.QueryEscape(orderNo))
 }
 
 func handlePaymentCallback(c *gin.Context) (bool, error) {
@@ -458,6 +477,7 @@ func toPaymentOrderResponse(order model.PaymentOrder) paymentOrderResponse {
 		RMBAmount: order.RMBAmount.StringFixed(2),
 		Method:    order.Method,
 		Status:    order.Status,
+		CreatedAt: order.CreatedAt.Format(time.RFC3339),
 	}
 	if order.PaidAt != nil {
 		response.PaidAt = order.PaidAt.Format(time.RFC3339)

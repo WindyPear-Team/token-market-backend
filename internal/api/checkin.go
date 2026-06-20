@@ -109,6 +109,29 @@ func (api *CheckInAPI) Status(c *gin.Context) {
 	})
 }
 
+func (api *CheckInAPI) ListRecords(c *gin.Context) {
+	user, ok := currentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	var records []model.CheckInRecord
+	if err := model.DB.Where("user_id = ?", user.ID).Order("check_in_date DESC").Limit(100).Find(&records).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load check-in records"})
+		return
+	}
+	briefs := make([]checkInRecordBrief, 0, len(records))
+	for _, record := range records {
+		briefs = append(briefs, checkInRecordBrief{
+			CheckInDate:  record.CheckInDate,
+			RewardAmount: record.RewardAmount.String(),
+			StreakDays:   record.StreakDays,
+			RewardKind:   record.RewardKind,
+		})
+	}
+	c.JSON(http.StatusOK, briefs)
+}
+
 func (api *CheckInAPI) Claim(c *gin.Context) {
 	user, ok := currentUser(c)
 	if !ok {
