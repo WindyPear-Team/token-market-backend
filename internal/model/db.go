@@ -324,6 +324,7 @@ func EnsureDefaultSystemSettings() error {
 		"sidebar_channels_enabled":        "true",
 		"sidebar_models_enabled":          "true",
 		"sidebar_users_enabled":           "true",
+		"chat_page_mode":                  "basic",
 		"referral_enabled":                "false",
 		"referral_commission_rate":        "0",
 		"group_multiplier_mode":           "min",

@@ -20,6 +20,11 @@ import (
 // SystemAPI handles global platform configuration.
 type SystemAPI struct{}
 
+const (
+	chatPageModeBasic    = "basic"
+	chatPageModeAdvanced = "advanced"
+)
+
 type systemSettingsResponse struct {
 	Edition                      string `json:"edition"`
 	SiteName                     string `json:"site_name"`
@@ -46,6 +51,7 @@ type systemSettingsResponse struct {
 	SidebarChannelsEnabled       bool   `json:"sidebar_channels_enabled"`
 	SidebarModelsEnabled         bool   `json:"sidebar_models_enabled"`
 	SidebarUsersEnabled          bool   `json:"sidebar_users_enabled"`
+	ChatPageMode                 string `json:"chat_page_mode"`
 	ReferralEnabled              bool   `json:"referral_enabled"`
 	ReferralCommissionRate       string `json:"referral_commission_rate"`
 	GroupMultiplierMode          string `json:"group_multiplier_mode"`
@@ -131,6 +137,7 @@ type systemSettingsInput struct {
 	SidebarChannelsEnabled       *bool   `json:"sidebar_channels_enabled"`
 	SidebarModelsEnabled         *bool   `json:"sidebar_models_enabled"`
 	SidebarUsersEnabled          *bool   `json:"sidebar_users_enabled"`
+	ChatPageMode                 *string `json:"chat_page_mode"`
 	ReferralEnabled              *bool   `json:"referral_enabled"`
 	ReferralCommissionRate       *string `json:"referral_commission_rate"`
 	GroupMultiplierMode          *string `json:"group_multiplier_mode"`
@@ -204,6 +211,19 @@ func (api *SystemAPI) UpdateSettings(c *gin.Context) {
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	var chatPageMode string
+	if input.ChatPageMode != nil {
+		chatPageMode = normalizeChatPageMode(*input.ChatPageMode)
+		if chatPageMode == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid chat page mode"})
+			return
+		}
+		if chatPageMode == chatPageModeAdvanced && service.CurrentEdition() != "premium" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Advanced chat requires premium edition"})
+			return
+		}
 	}
 
 	if input.SiteName != nil {
@@ -282,6 +302,13 @@ func (api *SystemAPI) UpdateSettings(c *gin.Context) {
 		}
 	}
 
+	if input.ChatPageMode != nil {
+		if err := model.SetSystemSetting("chat_page_mode", chatPageMode); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update system settings"})
+			return
+		}
+	}
+
 	boolSettings := map[string]*bool{
 		"top_nav_enabled":                input.TopNavEnabled,
 		"sidebar_dashboard_enabled":      input.SidebarDashboardEnabled,
@@ -355,6 +382,7 @@ func currentPublicSystemSettings() systemSettingsResponse {
 		SidebarChannelsEnabled:      settingBool("sidebar_channels_enabled", true),
 		SidebarModelsEnabled:        settingBool("sidebar_models_enabled", true),
 		SidebarUsersEnabled:         settingBool("sidebar_users_enabled", true),
+		ChatPageMode:                currentChatPageMode(),
 		ReferralEnabled:             settingBool("referral_enabled", false),
 		ReferralCommissionRate:      settingString("referral_commission_rate", "0"),
 		GroupMultiplierMode:         settingString("group_multiplier_mode", "min"),
@@ -419,6 +447,28 @@ func currentAdminSystemSettings() systemSettingsResponse {
 	settings.PaymentOpenPaymentNotifyURL = callbackURLFromBaseURL(settings.BaseURL, "/api/payment/openpayment/notify")
 	settings.PaymentOpenPaymentReturnURL = callbackURLFromBaseURL(settings.BaseURL, "/api/payment/openpayment/return")
 	return settings
+}
+
+func currentChatPageMode() string {
+	mode := normalizeChatPageMode(settingString("chat_page_mode", chatPageModeBasic))
+	if mode == "" {
+		return chatPageModeBasic
+	}
+	if mode == chatPageModeAdvanced && service.CurrentEdition() != "premium" {
+		return chatPageModeBasic
+	}
+	return mode
+}
+
+func normalizeChatPageMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", chatPageModeBasic:
+		return chatPageModeBasic
+	case chatPageModeAdvanced:
+		return chatPageModeAdvanced
+	default:
+		return ""
+	}
 }
 
 func callbackURLFromBaseURL(baseURL, path string) string {
