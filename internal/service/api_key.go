@@ -182,7 +182,7 @@ func APIKeyQuotaExceededInTx(tx *gorm.DB, apiKey *model.APIKey, cost decimal.Dec
 	if apiKey == nil || apiKey.QuotaLimit.LessThanOrEqual(decimal.Zero) {
 		return false, nil
 	}
-	used, err := APIKeyUsageCost(tx, apiKey.ID, apiKey.UserID)
+	used, err := APIKeyUsageCostSince(tx, apiKey.ID, apiKey.UserID, apiKey.UsageResetAt)
 	if err != nil {
 		return false, err
 	}
@@ -190,6 +190,20 @@ func APIKeyQuotaExceededInTx(tx *gorm.DB, apiKey *model.APIKey, cost decimal.Dec
 }
 
 func APIKeyUsageCost(tx *gorm.DB, apiKeyID uint, userID uint) (decimal.Decimal, error) {
+	var apiKey model.APIKey
+	if tx == nil {
+		tx = model.DB
+	}
+	if apiKeyID == 0 || userID == 0 {
+		return decimal.Zero, nil
+	}
+	if err := tx.Select("usage_reset_at").Where("id = ? AND user_id = ?", apiKeyID, userID).First(&apiKey).Error; err != nil {
+		return decimal.Zero, err
+	}
+	return APIKeyUsageCostSince(tx, apiKeyID, userID, apiKey.UsageResetAt)
+}
+
+func APIKeyUsageCostSince(tx *gorm.DB, apiKeyID uint, userID uint, usageResetAt *time.Time) (decimal.Decimal, error) {
 	if tx == nil {
 		tx = model.DB
 	}
@@ -197,10 +211,11 @@ func APIKeyUsageCost(tx *gorm.DB, apiKeyID uint, userID uint) (decimal.Decimal, 
 		return decimal.Zero, nil
 	}
 	var total decimal.Decimal
-	err := tx.Model(&model.TokenLog{}).
-		Where("api_key_id = ? AND user_id = ?", apiKeyID, userID).
-		Select("COALESCE(SUM(cost), 0)").
-		Scan(&total).Error
+	query := tx.Model(&model.TokenLog{}).Where("api_key_id = ? AND user_id = ?", apiKeyID, userID)
+	if usageResetAt != nil {
+		query = query.Where("created_at >= ?", *usageResetAt)
+	}
+	err := query.Select("COALESCE(SUM(cost), 0)").Scan(&total).Error
 	return total, err
 }
 

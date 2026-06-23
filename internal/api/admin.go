@@ -2762,6 +2762,7 @@ type apiKeyResponse struct {
 	Enabled             bool             `json:"enabled"`
 	Usage               usageStats       `json:"usage"`
 	LastUsedAt          *time.Time       `json:"last_used_at"`
+	UsageResetAt        *time.Time       `json:"usage_reset_at"`
 	CreatedAt           time.Time        `json:"created_at"`
 	UpdatedAt           time.Time        `json:"updated_at"`
 }
@@ -2925,6 +2926,28 @@ func (api *UserAPI) RotateAPIKey(c *gin.Context) {
 		"api_key": raw,
 		"key":     toAPIKeyResponse(apiKey),
 	})
+}
+
+func (api *UserAPI) ResetAPIKeyUsage(c *gin.Context) {
+	user, ok := currentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	var apiKey model.APIKey
+	if err := model.DB.Where("id = ? AND user_id = ?", c.Param("id"), user.ID).First(&apiKey).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "API key not found"})
+		return
+	}
+
+	now := time.Now()
+	if err := model.DB.Model(&apiKey).Update("usage_reset_at", &now).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset API key usage"})
+		return
+	}
+	apiKey.UsageResetAt = &now
+	c.JSON(http.StatusOK, toAPIKeyResponse(apiKey))
 }
 
 func (api *UserAPI) ListAPIKeys(c *gin.Context) {
@@ -3382,7 +3405,7 @@ func currentUser(c *gin.Context) (*model.User, bool) {
 }
 
 func toAPIKeyResponse(apiKey model.APIKey) apiKeyResponse {
-	usage := apiKeyUsageStats(apiKey.ID, apiKey.UserID)
+	usage := apiKeyUsageStats(apiKey.ID, apiKey.UserID, apiKey.UsageResetAt)
 	response := apiKeyResponse{
 		ID:                  apiKey.ID,
 		Name:                apiKey.Name,
@@ -3395,6 +3418,7 @@ func toAPIKeyResponse(apiKey model.APIKey) apiKeyResponse {
 		Enabled:             apiKey.Enabled,
 		Usage:               usage,
 		LastUsedAt:          apiKey.LastUsedAt,
+		UsageResetAt:        apiKey.UsageResetAt,
 		CreatedAt:           apiKey.CreatedAt,
 		UpdatedAt:           apiKey.UpdatedAt,
 	}
@@ -3408,13 +3432,16 @@ func toAPIKeyResponse(apiKey model.APIKey) apiKeyResponse {
 	return response
 }
 
-func apiKeyUsageStats(apiKeyID uint, userID uint) usageStats {
+func apiKeyUsageStats(apiKeyID uint, userID uint, usageResetAt *time.Time) usageStats {
 	if apiKeyID == 0 || userID == 0 {
 		return usageStats{}
 	}
 	var stats usageStats
-	model.DB.Model(&model.TokenLog{}).
-		Where("api_key_id = ? AND user_id = ?", apiKeyID, userID).
+	query := model.DB.Model(&model.TokenLog{}).Where("api_key_id = ? AND user_id = ?", apiKeyID, userID)
+	if usageResetAt != nil {
+		query = query.Where("created_at >= ?", *usageResetAt)
+	}
+	query.
 		Select(`
 			COUNT(*) AS request_count,
 			COALESCE(SUM(input_tokens), 0) AS input_tokens,
