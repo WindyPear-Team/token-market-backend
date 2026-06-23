@@ -24,7 +24,7 @@ type paginatedResponse struct {
 }
 
 func wantsPaginatedResponse(c *gin.Context) bool {
-	for _, key := range []string{"page", "page_size", "start_time", "end_time", "start_date", "end_date", "api_key_id"} {
+	for _, key := range []string{"page", "page_size", "start_time", "end_time", "start_date", "end_date", "api_key_id", "model_name", "user_channel_id", "channel_id"} {
 		if strings.TrimSpace(c.Query(key)) != "" {
 			return true
 		}

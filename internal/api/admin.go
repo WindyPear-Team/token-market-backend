@@ -3297,9 +3297,7 @@ type upstreamChannelUsageItem struct {
 func (api *StatsAPI) GetLogs(c *gin.Context) {
 	var logs []model.TokenLog
 	query := model.DB.Model(&model.TokenLog{})
-	if apiKeyID := positiveIntQuery(c, "api_key_id", 0); apiKeyID > 0 {
-		query = query.Where("api_key_id = ?", apiKeyID)
-	}
+	query = applyTokenLogFilters(query, c)
 	var err error
 	query, err = applyCreatedAtRange(query, c, "created_at")
 	if writePaginationError(c, err) {
@@ -3387,9 +3385,7 @@ func (api *StatsAPI) GetUserLogs(c *gin.Context) {
 
 	var logs []model.TokenLog
 	query := model.DB.Model(&model.TokenLog{}).Where("user_id = ?", user.ID)
-	if apiKeyID := positiveIntQuery(c, "api_key_id", 0); apiKeyID > 0 {
-		query = query.Where("api_key_id = ?", apiKeyID)
-	}
+	query = applyTokenLogFilters(query, c)
 	var err error
 	query, err = applyCreatedAtRange(query, c, "created_at")
 	if writePaginationError(c, err) {
@@ -3412,6 +3408,22 @@ func (api *StatsAPI) GetUserLogs(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, paginatedResponse{Items: logs, Total: total, Page: page, PageSize: pageSize})
+}
+
+func applyTokenLogFilters(query *gorm.DB, c *gin.Context) *gorm.DB {
+	if apiKeyID := positiveIntQuery(c, "api_key_id", 0); apiKeyID > 0 {
+		query = query.Where("api_key_id = ?", apiKeyID)
+	}
+	if userChannelID := positiveIntQuery(c, "user_channel_id", 0); userChannelID > 0 {
+		query = query.Where("user_channel_id = ?", userChannelID)
+	}
+	if channelID := positiveIntQuery(c, "channel_id", 0); channelID > 0 {
+		query = query.Where("channel_id = ?", channelID)
+	}
+	if modelName := strings.TrimSpace(c.Query("model_name")); modelName != "" {
+		query = query.Where("LOWER(model_name) LIKE ?", "%"+strings.ToLower(modelName)+"%")
+	}
+	return query
 }
 
 func (api *StatsAPI) GetDashboardStats(c *gin.Context) {
