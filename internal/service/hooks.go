@@ -37,13 +37,17 @@ type MetaModelResolveResult struct {
 }
 
 type MetaModelCatalogItem struct {
-	Name             string          `json:"name"`
-	Description      string          `json:"description"`
-	BillingMode      string          `json:"billing_mode"`
-	InputPrice       decimal.Decimal `json:"input_price"`
-	OutputPrice      decimal.Decimal `json:"output_price"`
-	CachedInputPrice decimal.Decimal `json:"cached_input_price"`
-	ReferencedModels []string        `json:"referenced_models"`
+	Name                   string          `json:"name"`
+	Description            string          `json:"description"`
+	Provider               string          `json:"provider"`
+	ProviderName           string          `json:"provider_name"`
+	ProviderIconURL        string          `json:"provider_icon_url"`
+	BillingMode            string          `json:"billing_mode"`
+	InputPrice             decimal.Decimal `json:"input_price"`
+	OutputPrice            decimal.Decimal `json:"output_price"`
+	CachedInputPrice       decimal.Decimal `json:"cached_input_price"`
+	ExposeReferencedModels bool            `json:"expose_referenced_models"`
+	ReferencedModels       []string        `json:"referenced_models"`
 }
 
 var startupHooks []StartupHook

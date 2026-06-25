@@ -1616,16 +1616,19 @@ func addMetaModelCatalogItems(catalog map[string]*publicModelCatalogAggregate, m
 		}
 		item := &publicModelCatalogAggregate{
 			publicModelCatalogItem: publicModelCatalogItem{
-				ModelName:        name,
-				Description:      strings.TrimSpace(meta.Description),
-				Provider:         "meta",
-				ProviderName:     "Meta Module",
-				IsMetaModel:      true,
-				MetaBillingMode:  strings.TrimSpace(meta.BillingMode),
-				ReferencedModels: referenced,
-				UserChannels:     []publicModelUserChannel{},
+				ModelName:       name,
+				Description:     strings.TrimSpace(meta.Description),
+				Provider:        firstNonEmptyString(strings.TrimSpace(meta.Provider), "meta"),
+				ProviderName:    firstNonEmptyString(strings.TrimSpace(meta.ProviderName), "Meta Module"),
+				ProviderIconURL: strings.TrimSpace(meta.ProviderIconURL),
+				IsMetaModel:     true,
+				MetaBillingMode: strings.TrimSpace(meta.BillingMode),
+				UserChannels:    []publicModelUserChannel{},
 			},
 			userChannelMap: map[uint]*publicModelUserChannel{},
+		}
+		if meta.ExposeReferencedModels {
+			item.ReferencedModels = referenced
 		}
 		if item.MetaBillingMode == "meta" {
 			item.InputPrice = meta.InputPrice
