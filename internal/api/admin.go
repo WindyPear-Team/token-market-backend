@@ -84,6 +84,7 @@ type systemSettingsResponse struct {
 	SidebarModelsEnabled          bool   `json:"sidebar_models_enabled"`
 	SidebarUsersEnabled           bool   `json:"sidebar_users_enabled"`
 	ChatPageMode                  string `json:"chat_page_mode"`
+	MessageChannelEnabled         bool   `json:"message_channel_enabled"`
 	ReferralEnabled               bool   `json:"referral_enabled"`
 	ReferralCommissionRate        string `json:"referral_commission_rate"`
 	GroupMultiplierMode           string `json:"group_multiplier_mode"`
@@ -200,6 +201,7 @@ type systemSettingsInput struct {
 	SidebarModelsEnabled          *bool   `json:"sidebar_models_enabled"`
 	SidebarUsersEnabled           *bool   `json:"sidebar_users_enabled"`
 	ChatPageMode                  *string `json:"chat_page_mode"`
+	MessageChannelEnabled         *bool   `json:"message_channel_enabled"`
 	ReferralEnabled               *bool   `json:"referral_enabled"`
 	ReferralCommissionRate        *string `json:"referral_commission_rate"`
 	GroupMultiplierMode           *string `json:"group_multiplier_mode"`
@@ -286,6 +288,10 @@ func (api *SystemAPI) UpdateSettings(c *gin.Context) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Advanced chat requires premium edition"})
 			return
 		}
+	}
+	if input.MessageChannelEnabled != nil && *input.MessageChannelEnabled && service.CurrentEdition() != "premium" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Message channel requires premium edition"})
+		return
 	}
 
 	var authAgreementMode string
@@ -430,6 +436,7 @@ func (api *SystemAPI) UpdateSettings(c *gin.Context) {
 		"sidebar_channels_enabled":       input.SidebarChannelsEnabled,
 		"sidebar_models_enabled":         input.SidebarModelsEnabled,
 		"sidebar_users_enabled":          input.SidebarUsersEnabled,
+		"message_channel_enabled":        input.MessageChannelEnabled,
 		"referral_enabled":               input.ReferralEnabled,
 		"pricing_endpoint_enabled":       input.PricingEndpointEnabled,
 		"status_monitor_enabled":         input.StatusMonitorEnabled,
@@ -519,6 +526,7 @@ func currentPublicSystemSettings() systemSettingsResponse {
 		SidebarModelsEnabled:          settingBool("sidebar_models_enabled", true),
 		SidebarUsersEnabled:           settingBool("sidebar_users_enabled", true),
 		ChatPageMode:                  currentChatPageMode(),
+		MessageChannelEnabled:         currentMessageChannelEnabled(),
 		ReferralEnabled:               settingBool("referral_enabled", false),
 		ReferralCommissionRate:        settingString("referral_commission_rate", "0"),
 		GroupMultiplierMode:           settingString("group_multiplier_mode", "min"),
@@ -594,6 +602,10 @@ func currentChatPageMode() string {
 		return chatPageModeBasic
 	}
 	return mode
+}
+
+func currentMessageChannelEnabled() bool {
+	return service.CurrentEdition() == "premium" && settingBool("message_channel_enabled", false)
 }
 
 func currentAuthAgreementMode() string {
