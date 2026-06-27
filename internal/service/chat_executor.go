@@ -167,15 +167,12 @@ func ExecuteServerChatCompletion(c *gin.Context, user *model.User, req ChatExecu
 	}
 
 	if upstreamReq.Stream && isStreamingResponse(resp) {
-		result, usage, usageOK, err := readServerChatStream(resp.Body, protocol, req.OnTextDelta)
-		if err != nil {
+		result, usage, usageOK, streamErr := readServerChatStream(resp.Body, protocol, req.OnTextDelta)
+		if streamErr != nil && !billableStreamPartial(result, usageOK) {
 			return nil, newChatExecutorError(http.StatusBadGateway, "Failed to read upstream stream")
 		}
 		if !usageOK {
-			usage = usageTokenCounts{
-				InputTokens:  CountTokens(modelName, serverChatMessagesText(req)),
-				OutputTokens: CountTokens(modelName, result.Content),
-			}
+			usage = estimatedServerChatUsage(modelName, req, result.Content)
 		}
 
 		apiKey := currentAPIKey(c)
@@ -184,6 +181,9 @@ func ExecuteServerChatCompletion(c *gin.Context, user *model.User, req ChatExecu
 			return nil, newChatExecutorError(status, message)
 		}
 		result.Cost = cost
+		if streamErr != nil && strings.TrimSpace(result.FinishReason) == "" {
+			result.FinishReason = "stream_error"
+		}
 		return result, nil
 	}
 
@@ -198,10 +198,7 @@ func ExecuteServerChatCompletion(c *gin.Context, user *model.User, req ChatExecu
 
 	usage, ok := parseUsageTokens(responseData)
 	if !ok {
-		usage = usageTokenCounts{
-			InputTokens:  CountTokens(modelName, serverChatMessagesText(req)),
-			OutputTokens: CountTokens(modelName, string(respBody)),
-		}
+		usage = estimatedServerChatUsage(modelName, req, string(respBody))
 	}
 
 	apiKey := currentAPIKey(c)
@@ -319,6 +316,23 @@ func userAgentForLog(c *gin.Context) string {
 
 func serverChatStreamSupported(protocol proxyProtocol) bool {
 	return protocol == protocolOpenAI || protocol == protocolResponses || protocol == protocolClaude
+}
+
+func billableStreamPartial(result *ChatExecutorResult, usageOK bool) bool {
+	if usageOK {
+		return true
+	}
+	if result == nil {
+		return false
+	}
+	return strings.TrimSpace(result.Content) != "" || len(result.ToolCalls) > 0
+}
+
+func estimatedServerChatUsage(modelName string, req ChatExecutorRequest, outputText string) usageTokenCounts {
+	return usageTokenCounts{
+		InputTokens:  CountTokens(modelName, serverChatMessagesText(req)),
+		OutputTokens: CountTokens(modelName, outputText),
+	}
 }
 
 // prepareServerChatRequest builds the upstream HTTP request and translates the

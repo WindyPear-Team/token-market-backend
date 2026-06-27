@@ -83,6 +83,22 @@ func TestPrepareServerChatRequestIncludesImageParts(t *testing.T) {
 	})
 }
 
+func TestReadServerChatStreamKeepsPartialContentOnCallbackError(t *testing.T) {
+	stream := "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"
+	result, _, usageOK, err := readServerChatStream(strings.NewReader(stream), protocolOpenAI, func(string) error {
+		return errTestStreamCallback
+	})
+	if err == nil {
+		t.Fatal("readServerChatStream error = nil, want callback error")
+	}
+	if result.Content != "hello" {
+		t.Fatalf("partial content = %q, want hello", result.Content)
+	}
+	if !billableStreamPartial(result, usageOK) {
+		t.Fatal("partial stream result should be billable")
+	}
+}
+
 func decodePreparedBody(t *testing.T, body []byte) map[string]interface{} {
 	t.Helper()
 	var decoded map[string]interface{}
@@ -91,3 +107,5 @@ func decodePreparedBody(t *testing.T, body []byte) map[string]interface{} {
 	}
 	return decoded
 }
+
+var errTestStreamCallback = &ChatExecutorError{Status: 499, Message: "stream callback failed"}
