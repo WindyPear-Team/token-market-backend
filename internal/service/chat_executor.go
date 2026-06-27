@@ -22,11 +22,20 @@ import (
 // ToolCalls, ToolCallID and Name are provider-neutral tool-loop state; each
 // protocol-specific request builder translates them into its own wire format.
 type ChatExecutorMessage struct {
-	Role       string                   `json:"role"`
-	Content    string                   `json:"content"`
-	ToolCalls  []map[string]interface{} `json:"tool_calls,omitempty"`
-	ToolCallID string                   `json:"tool_call_id,omitempty"`
-	Name       string                   `json:"name,omitempty"`
+	Role       string                    `json:"role"`
+	Content    string                    `json:"content"`
+	Parts      []ChatExecutorContentPart `json:"parts,omitempty"`
+	ToolCalls  []map[string]interface{}  `json:"tool_calls,omitempty"`
+	ToolCallID string                    `json:"tool_call_id,omitempty"`
+	Name       string                    `json:"name,omitempty"`
+}
+
+type ChatExecutorContentPart struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	MIMEType string `json:"mime_type,omitempty"`
+	Data     string `json:"data,omitempty"`
+	URL      string `json:"url,omitempty"`
 }
 
 // ChatExecutorTool describes a tool exposed to the upstream model. Schema is the
@@ -336,7 +345,9 @@ func prepareServerOpenAIChatRequest(channel *model.Channel, upstreamModelName st
 	}
 	for _, message := range req.Messages {
 		entry := map[string]interface{}{"role": message.Role}
-		if message.Content != "" || (len(message.ToolCalls) == 0 && message.Role != "assistant") {
+		if len(message.Parts) > 0 && strings.EqualFold(message.Role, "user") {
+			entry["content"] = openAIChatContentParts(message)
+		} else if message.Content != "" || (len(message.ToolCalls) == 0 && message.Role != "assistant") {
 			entry["content"] = message.Content
 		}
 		if len(message.ToolCalls) > 0 {
@@ -410,7 +421,9 @@ func prepareServerOpenAIResponsesRequest(channel *model.Channel, upstreamModelNa
 			})
 		default:
 			role := responseInputRole(message.Role)
-			if strings.TrimSpace(message.Content) != "" || role == "user" {
+			if len(message.Parts) > 0 && role == "user" {
+				input = append(input, map[string]interface{}{"role": role, "content": openAIResponsesContentParts(message)})
+			} else if strings.TrimSpace(message.Content) != "" || role == "user" {
 				input = append(input, map[string]interface{}{"role": role, "content": message.Content})
 			}
 		}
@@ -469,7 +482,9 @@ func prepareServerClaudeMessagesRequest(channel *model.Channel, upstreamModelNam
 				}},
 			})
 		default:
-			if strings.TrimSpace(message.Content) != "" {
+			if len(message.Parts) > 0 {
+				messages = append(messages, map[string]interface{}{"role": "user", "content": claudeContentBlocks(message)})
+			} else if strings.TrimSpace(message.Content) != "" {
 				messages = append(messages, map[string]interface{}{"role": "user", "content": message.Content})
 			}
 		}
@@ -536,7 +551,12 @@ func prepareServerGeminiGenerateContentRequest(channel *model.Channel, upstreamM
 				}}},
 			})
 		default:
-			if strings.TrimSpace(message.Content) != "" {
+			if len(message.Parts) > 0 {
+				parts := geminiContentParts(message)
+				if len(parts) > 0 {
+					contents = append(contents, map[string]interface{}{"role": "user", "parts": parts})
+				}
+			} else if strings.TrimSpace(message.Content) != "" {
 				contents = append(contents, map[string]interface{}{"role": "user", "parts": []map[string]interface{}{{"text": message.Content}}})
 			}
 		}
@@ -942,6 +962,129 @@ func finalizeServerChatStreamResult(result *ChatExecutorResult) {
 	}
 	result.ToolCalls = calls
 	result.AssistantMessage = assistantMessageFromToolCalls(result.Content, result.ToolCalls)
+}
+
+func openAIChatContentParts(message ChatExecutorMessage) []map[string]interface{} {
+	parts := make([]map[string]interface{}, 0, len(message.Parts)+1)
+	for _, part := range normalizedChatExecutorParts(message) {
+		switch part.Type {
+		case "image":
+			if url := imagePartURL(part); url != "" {
+				parts = append(parts, map[string]interface{}{
+					"type":      "image_url",
+					"image_url": map[string]interface{}{"url": url},
+				})
+			}
+		default:
+			if strings.TrimSpace(part.Text) != "" {
+				parts = append(parts, map[string]interface{}{"type": "text", "text": part.Text})
+			}
+		}
+	}
+	return parts
+}
+
+func openAIResponsesContentParts(message ChatExecutorMessage) []map[string]interface{} {
+	parts := make([]map[string]interface{}, 0, len(message.Parts)+1)
+	for _, part := range normalizedChatExecutorParts(message) {
+		switch part.Type {
+		case "image":
+			if url := imagePartURL(part); url != "" {
+				parts = append(parts, map[string]interface{}{"type": "input_image", "image_url": url})
+			}
+		default:
+			if strings.TrimSpace(part.Text) != "" {
+				parts = append(parts, map[string]interface{}{"type": "input_text", "text": part.Text})
+			}
+		}
+	}
+	return parts
+}
+
+func claudeContentBlocks(message ChatExecutorMessage) []map[string]interface{} {
+	blocks := make([]map[string]interface{}, 0, len(message.Parts)+1)
+	for _, part := range normalizedChatExecutorParts(message) {
+		switch part.Type {
+		case "image":
+			if strings.TrimSpace(part.Data) != "" && strings.TrimSpace(part.MIMEType) != "" {
+				blocks = append(blocks, map[string]interface{}{
+					"type": "image",
+					"source": map[string]interface{}{
+						"type":       "base64",
+						"media_type": part.MIMEType,
+						"data":       part.Data,
+					},
+				})
+			}
+		default:
+			if strings.TrimSpace(part.Text) != "" {
+				blocks = append(blocks, map[string]interface{}{"type": "text", "text": part.Text})
+			}
+		}
+	}
+	return blocks
+}
+
+func geminiContentParts(message ChatExecutorMessage) []map[string]interface{} {
+	parts := make([]map[string]interface{}, 0, len(message.Parts)+1)
+	for _, part := range normalizedChatExecutorParts(message) {
+		switch part.Type {
+		case "image":
+			if strings.TrimSpace(part.Data) != "" && strings.TrimSpace(part.MIMEType) != "" {
+				parts = append(parts, map[string]interface{}{
+					"inlineData": map[string]interface{}{
+						"mimeType": part.MIMEType,
+						"data":     part.Data,
+					},
+				})
+			}
+		default:
+			if strings.TrimSpace(part.Text) != "" {
+				parts = append(parts, map[string]interface{}{"text": part.Text})
+			}
+		}
+	}
+	return parts
+}
+
+func normalizedChatExecutorParts(message ChatExecutorMessage) []ChatExecutorContentPart {
+	parts := make([]ChatExecutorContentPart, 0, len(message.Parts)+1)
+	hasText := false
+	for _, part := range message.Parts {
+		part.Type = strings.ToLower(strings.TrimSpace(part.Type))
+		if part.Type == "" {
+			part.Type = "text"
+		}
+		part.Text = strings.TrimSpace(part.Text)
+		part.MIMEType = strings.TrimSpace(part.MIMEType)
+		part.Data = strings.TrimSpace(part.Data)
+		part.URL = strings.TrimSpace(part.URL)
+		if part.Type == "text" && part.Text != "" {
+			hasText = true
+		}
+		if part.Type == "image" && part.MIMEType == "" {
+			part.MIMEType = "image/png"
+		}
+		parts = append(parts, part)
+	}
+	if !hasText && strings.TrimSpace(message.Content) != "" {
+		return append([]ChatExecutorContentPart{{Type: "text", Text: message.Content}}, parts...)
+	}
+	return parts
+}
+
+func imagePartURL(part ChatExecutorContentPart) string {
+	if strings.TrimSpace(part.URL) != "" {
+		return strings.TrimSpace(part.URL)
+	}
+	if strings.TrimSpace(part.Data) == "" {
+		return ""
+	}
+	mimeType := strings.TrimSpace(part.MIMEType)
+	if mimeType == "" {
+		mimeType = "image/png"
+	}
+	return "data:" + mimeType + ";base64," + strings.TrimSpace(part.Data)
 }
 
 func intFromStreamValue(values ...interface{}) int {
