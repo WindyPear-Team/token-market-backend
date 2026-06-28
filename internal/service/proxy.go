@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/WindyPear-Team/flai/internal/adapters"
 	"github.com/WindyPear-Team/flai/internal/model"
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
@@ -655,12 +656,15 @@ func (s *ProxyService) fetchUpstreamVideoTask(c *gin.Context, channel *model.Cha
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Video task status is only supported for video upstream channels", "type": "unsupported_upstream"})
 		return nil, nil, nil, false
 	}
-	headers := jsonHeaders()
-	headers.Set("Authorization", "Bearer "+strings.TrimSpace(channel.APIKey))
+	path, ok := adapters.Path(channel.Type, adapters.EndpointVideoStatus, upstreamTaskID)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Video task status is not supported for this upstream channel", "type": "unsupported_upstream"})
+		return nil, nil, nil, false
+	}
 	prepared := preparedUpstreamRequest{
 		Method: http.MethodGet,
-		URL:    upstreamURLForRequest(channel.BaseURL, videoTaskStatusPath(upstreamProtocol, upstreamTaskID)),
-		Header: headers,
+		URL:    upstreamURLForRequest(channel.BaseURL, path),
+		Header: adapters.Headers(channel.Type, channel.APIKey, adapters.Protocol(upstreamProtocol), false),
 	}
 	resp, err := s.doUpstreamRequest(prepared, channel)
 	if err != nil {
@@ -1766,23 +1770,10 @@ func providerHeadersFromOriginal(channel *model.Channel, protocol proxyProtocol,
 		headers.Set("Accept", "application/json")
 	}
 
-	apiKey := strings.TrimSpace(channel.APIKey)
-	switch protocol {
-	case protocolClaude:
-		if apiKey != "" {
-			headers.Set("x-api-key", apiKey)
-			headers.Set("Authorization", "Bearer "+apiKey)
-		}
-		if headers.Get("anthropic-version") == "" {
-			headers.Set("anthropic-version", "2023-06-01")
-		}
-	case protocolGemini:
-		if apiKey != "" {
-			headers.Set("x-goog-api-key", apiKey)
-		}
-	default:
-		if apiKey != "" {
-			headers.Set("Authorization", "Bearer "+apiKey)
+	adapterHeaders := adapters.Headers(channel.Type, channel.APIKey, adapters.Protocol(protocol), false)
+	for key, values := range adapterHeaders {
+		if _, exists := headers[key]; !exists || len(headers[key]) == 0 {
+			headers[key] = values
 		}
 	}
 	return headers
@@ -1819,39 +1810,55 @@ func upstreamURLForRequest(baseURL string, path string) string {
 func prepareProviderRequest(channel *model.Channel, protocol proxyProtocol, request normalizedAIRequest) (preparedUpstreamRequest, error) {
 	switch protocol {
 	case protocolResponses:
-		body, err := openAIResponsesPayload(request)
+		payload, err := openAIResponsesPayloadMap(request)
 		if err != nil {
 			return preparedUpstreamRequest{}, err
 		}
-		headers := jsonHeaders()
-		headers.Set("Authorization", "Bearer "+strings.TrimSpace(channel.APIKey))
+		adapters.ApplyPayload(channel.Type, adapters.EndpointResponses, payload)
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return preparedUpstreamRequest{}, err
+		}
+		path, ok := adapters.Path(channel.Type, adapters.EndpointResponses, request.Model)
+		if !ok {
+			return preparedUpstreamRequest{}, fmt.Errorf("responses endpoint is not supported for channel type %q", channel.Type)
+		}
 		return preparedUpstreamRequest{
 			Method: http.MethodPost,
-			URL:    upstreamURLForRequest(channel.BaseURL, "/v1/responses"),
+			URL:    upstreamURLForRequest(channel.BaseURL, path),
 			Body:   body,
-			Header: headers,
+			Header: adapters.Headers(channel.Type, channel.APIKey, adapters.Protocol(protocol), request.Stream),
 		}, nil
 	case protocolClaude:
-		body, err := claudeMessagesPayload(request)
+		payload, err := claudeMessagesPayloadMap(request)
 		if err != nil {
 			return preparedUpstreamRequest{}, err
 		}
-		headers := jsonHeaders()
-		headers.Set("x-api-key", strings.TrimSpace(channel.APIKey))
-		headers.Set("Authorization", "Bearer "+strings.TrimSpace(channel.APIKey))
-		headers.Set("anthropic-version", "2023-06-01")
+		adapters.ApplyPayload(channel.Type, adapters.EndpointClaudeMessages, payload)
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return preparedUpstreamRequest{}, err
+		}
+		path, ok := adapters.Path(channel.Type, adapters.EndpointClaudeMessages, request.Model)
+		if !ok {
+			return preparedUpstreamRequest{}, fmt.Errorf("claude messages endpoint is not supported for channel type %q", channel.Type)
+		}
 		return preparedUpstreamRequest{
 			Method: http.MethodPost,
-			URL:    upstreamURLForRequest(channel.BaseURL, "/v1/messages"),
+			URL:    upstreamURLForRequest(channel.BaseURL, path),
 			Body:   body,
-			Header: headers,
+			Header: adapters.Headers(channel.Type, channel.APIKey, adapters.Protocol(protocol), request.Stream),
 		}, nil
 	case protocolGemini:
 		body, err := geminiGenerateContentPayload(request)
 		if err != nil {
 			return preparedUpstreamRequest{}, err
 		}
-		fullURL := upstreamURLForRequest(channel.BaseURL, "/v1beta/models/"+url.PathEscape(strings.TrimPrefix(request.Model, "models/"))+":generateContent")
+		path, ok := adapters.Path(channel.Type, adapters.EndpointGeminiGenerate, request.Model)
+		if !ok {
+			return preparedUpstreamRequest{}, fmt.Errorf("gemini generate endpoint is not supported for channel type %q", channel.Type)
+		}
+		fullURL := upstreamURLForRequest(channel.BaseURL, path)
 		if strings.TrimSpace(channel.APIKey) != "" {
 			fullURL = withQueryParam(fullURL, "key", strings.TrimSpace(channel.APIKey))
 		}
@@ -1862,17 +1869,24 @@ func prepareProviderRequest(channel *model.Channel, protocol proxyProtocol, requ
 			Header: jsonHeaders(),
 		}, nil
 	case protocolOpenAI:
-		body, err := openAIChatCompletionsPayload(request)
+		payload, err := openAIChatCompletionsPayloadMap(request)
 		if err != nil {
 			return preparedUpstreamRequest{}, err
 		}
-		headers := jsonHeaders()
-		headers.Set("Authorization", "Bearer "+strings.TrimSpace(channel.APIKey))
+		adapters.ApplyPayload(channel.Type, adapters.EndpointChat, payload)
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return preparedUpstreamRequest{}, err
+		}
+		path, ok := adapters.Path(channel.Type, adapters.EndpointChat, request.Model)
+		if !ok {
+			return preparedUpstreamRequest{}, fmt.Errorf("chat endpoint is not supported for channel type %q", channel.Type)
+		}
 		return preparedUpstreamRequest{
 			Method: http.MethodPost,
-			URL:    upstreamURLForRequest(channel.BaseURL, "/v1/chat/completions"),
+			URL:    upstreamURLForRequest(channel.BaseURL, path),
 			Body:   body,
-			Header: headers,
+			Header: adapters.Headers(channel.Type, channel.APIKey, adapters.Protocol(protocol), request.Stream),
 		}, nil
 	default:
 		return preparedUpstreamRequest{}, fmt.Errorf("unsupported upstream protocol: %s", protocol)
@@ -1895,13 +1909,20 @@ func prepareOpenAIImageGenerationRequest(channel *model.Channel, upstreamModelNa
 	if err != nil {
 		return preparedUpstreamRequest{}, err
 	}
-	headers := jsonHeaders()
-	headers.Set("Authorization", "Bearer "+strings.TrimSpace(channel.APIKey))
+	adapters.ApplyPayload(channel.Type, adapters.EndpointImageGeneration, payload)
+	body, err = json.Marshal(payload)
+	if err != nil {
+		return preparedUpstreamRequest{}, err
+	}
+	path, ok := adapters.Path(channel.Type, adapters.EndpointImageGeneration, upstreamModelName)
+	if !ok {
+		return preparedUpstreamRequest{}, fmt.Errorf("image generation endpoint is not supported for channel type %q", channel.Type)
+	}
 	return preparedUpstreamRequest{
 		Method: http.MethodPost,
-		URL:    upstreamURLForRequest(channel.BaseURL, "/v1/images/generations"),
+		URL:    upstreamURLForRequest(channel.BaseURL, path),
 		Body:   body,
-		Header: headers,
+		Header: adapters.Headers(channel.Type, channel.APIKey, adapters.ProtocolOpenAI, false),
 	}, nil
 }
 
@@ -1954,13 +1975,15 @@ func prepareOpenAIImageEditRequest(channel *model.Channel, upstreamModelName str
 		return preparedUpstreamRequest{}, err
 	}
 
-	headers := http.Header{}
+	path, ok := adapters.Path(channel.Type, adapters.EndpointImageEdit, upstreamModelName)
+	if !ok {
+		return preparedUpstreamRequest{}, fmt.Errorf("image edit endpoint is not supported for channel type %q", channel.Type)
+	}
+	headers := adapters.Headers(channel.Type, channel.APIKey, adapters.ProtocolOpenAI, false)
 	headers.Set("Content-Type", writer.FormDataContentType())
-	headers.Set("Accept", "application/json")
-	headers.Set("Authorization", "Bearer "+strings.TrimSpace(channel.APIKey))
 	return preparedUpstreamRequest{
 		Method: http.MethodPost,
-		URL:    upstreamURLForRequest(channel.BaseURL, "/v1/images/edits"),
+		URL:    upstreamURLForRequest(channel.BaseURL, path),
 		Body:   body.Bytes(),
 		Header: headers,
 	}, nil
@@ -1982,13 +2005,15 @@ func prepareOpenAIVideoGenerationRequest(channel *model.Channel, upstreamModelNa
 	if err != nil {
 		return preparedUpstreamRequest{}, err
 	}
-	headers := jsonHeaders()
-	headers.Set("Authorization", "Bearer "+strings.TrimSpace(channel.APIKey))
+	path, ok := adapters.Path(channel.Type, adapters.EndpointVideoGeneration, upstreamModelName)
+	if !ok {
+		return preparedUpstreamRequest{}, fmt.Errorf("video generation endpoint is not supported for channel type %q", channel.Type)
+	}
 	return preparedUpstreamRequest{
 		Method: http.MethodPost,
-		URL:    upstreamURLForRequest(channel.BaseURL, "/v1/video/generations"),
+		URL:    upstreamURLForRequest(channel.BaseURL, path),
 		Body:   body,
-		Header: headers,
+		Header: adapters.Headers(channel.Type, channel.APIKey, adapters.ProtocolOpenAIVideo, false),
 	}, nil
 }
 
@@ -2049,13 +2074,11 @@ func prepareKlingImageToVideoRequest(channel *model.Channel, upstreamModelName s
 	if err != nil {
 		return preparedUpstreamRequest{}, err
 	}
-	headers := jsonHeaders()
-	headers.Set("Authorization", "Bearer "+strings.TrimSpace(channel.APIKey))
 	return preparedUpstreamRequest{
 		Method: http.MethodPost,
 		URL:    upstreamURLForRequest(channel.BaseURL, "/v1/videos/image2video"),
 		Body:   body,
-		Header: headers,
+		Header: adapters.Headers(channel.Type, channel.APIKey, adapters.ProtocolKling, false),
 	}, nil
 }
 
@@ -2112,26 +2135,7 @@ func withQueryParam(rawURL, key, value string) string {
 }
 
 func channelProtocol(channelType string) proxyProtocol {
-	switch strings.ToLower(strings.TrimSpace(channelType)) {
-	case "completion", "completions", "chat_completion", "chat_completions", "openai", "newapi", "oneapi":
-		return protocolOpenAI
-	case "responses", "response", "openai_responses":
-		return protocolResponses
-	case "openai-video", "openai_video", "video", "veo", "seedance":
-		return protocolOpenAIVideo
-	case "seedream":
-		return protocolOpenAI
-	case "kling", "klingai", "kling_ai":
-		return protocolKling
-	case "midjourney", "mj":
-		return protocolMidjourney
-	case "claude", "anthropic":
-		return protocolClaude
-	case "gemini", "google":
-		return protocolGemini
-	default:
-		return protocolOpenAI
-	}
+	return proxyProtocol(adapters.ProtocolFor(channelType))
 }
 
 func supportsOpenAIImageEndpoint(protocol proxyProtocol) bool {
@@ -2259,6 +2263,14 @@ func addNormalizedMessage(request *normalizedAIRequest, role string, content str
 }
 
 func openAIChatCompletionsPayload(request normalizedAIRequest) ([]byte, error) {
+	payload, err := openAIChatCompletionsPayloadMap(request)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(payload)
+}
+
+func openAIChatCompletionsPayloadMap(request normalizedAIRequest) (map[string]interface{}, error) {
 	messages := make([]map[string]interface{}, 0, len(request.Messages)+1)
 	if strings.TrimSpace(request.System) != "" {
 		messages = append(messages, map[string]interface{}{"role": "system", "content": request.System})
@@ -2282,10 +2294,18 @@ func openAIChatCompletionsPayload(request normalizedAIRequest) ([]byte, error) {
 	if request.Stream {
 		payload["stream"] = true
 	}
-	return json.Marshal(payload)
+	return payload, nil
 }
 
 func openAIResponsesPayload(request normalizedAIRequest) ([]byte, error) {
+	payload, err := openAIResponsesPayloadMap(request)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(payload)
+}
+
+func openAIResponsesPayloadMap(request normalizedAIRequest) (map[string]interface{}, error) {
 	input := make([]map[string]interface{}, 0, len(request.Messages)+1)
 	if strings.TrimSpace(request.System) != "" {
 		input = append(input, map[string]interface{}{"role": "system", "content": request.System})
@@ -2309,10 +2329,18 @@ func openAIResponsesPayload(request normalizedAIRequest) ([]byte, error) {
 	if request.Stream {
 		payload["stream"] = true
 	}
-	return json.Marshal(payload)
+	return payload, nil
 }
 
 func claudeMessagesPayload(request normalizedAIRequest) ([]byte, error) {
+	payload, err := claudeMessagesPayloadMap(request)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(payload)
+}
+
+func claudeMessagesPayloadMap(request normalizedAIRequest) (map[string]interface{}, error) {
 	messages := make([]map[string]interface{}, 0, len(request.Messages))
 	for _, message := range request.Messages {
 		role := "user"
@@ -2339,7 +2367,7 @@ func claudeMessagesPayload(request normalizedAIRequest) ([]byte, error) {
 	if request.Temperature != nil {
 		payload["temperature"] = *request.Temperature
 	}
-	return json.Marshal(payload)
+	return payload, nil
 }
 
 func geminiGenerateContentPayload(request normalizedAIRequest) ([]byte, error) {
