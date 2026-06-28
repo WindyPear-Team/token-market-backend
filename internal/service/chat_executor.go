@@ -50,16 +50,17 @@ type ChatExecutorTool struct {
 // UserChannelID, when non-zero, pins the request to a single user-facing channel
 // (渠道) exactly like an API key bound to that channel would.
 type ChatExecutorRequest struct {
-	Context       context.Context
-	ModelName     string
-	UserChannelID uint
-	Messages      []ChatExecutorMessage
-	System        string
-	Tools         []ChatExecutorTool
-	MaxTokens     int
-	Temperature   *float64
-	Stream        bool
-	OnTextDelta   func(delta string) error
+	Context         context.Context
+	ModelName       string
+	UserChannelID   uint
+	Messages        []ChatExecutorMessage
+	System          string
+	Tools           []ChatExecutorTool
+	MaxTokens       int
+	Temperature     *float64
+	ReasoningEffort string
+	Stream          bool
+	OnTextDelta     func(delta string) error
 }
 
 // ChatExecutorToolCall is a tool invocation requested by the model.
@@ -388,6 +389,9 @@ func prepareServerOpenAIChatRequest(channel *model.Channel, upstreamModelName st
 	if req.Temperature != nil {
 		payload["temperature"] = *req.Temperature
 	}
+	if effort := normalizeReasoningEffort(req.ReasoningEffort); effort != "" {
+		payload["reasoning_effort"] = effort
+	}
 	if len(req.Tools) > 0 {
 		payload["tools"] = openAIChatTools(req.Tools)
 		payload["tool_choice"] = "auto"
@@ -451,6 +455,9 @@ func prepareServerOpenAIResponsesRequest(channel *model.Channel, upstreamModelNa
 	}
 	if req.Temperature != nil {
 		payload["temperature"] = *req.Temperature
+	}
+	if effort := normalizeReasoningEffort(req.ReasoningEffort); effort != "" {
+		payload["reasoning"] = map[string]interface{}{"effort": effort}
 	}
 	if len(req.Tools) > 0 {
 		payload["tools"] = openAIResponsesTools(req.Tools)
@@ -516,6 +523,9 @@ func prepareServerClaudeMessagesRequest(channel *model.Channel, upstreamModelNam
 	}
 	if req.Temperature != nil {
 		payload["temperature"] = *req.Temperature
+	}
+	if effort := claudeThinkingEffort(req.ReasoningEffort); effort > 0 {
+		payload["thinking"] = map[string]interface{}{"type": "enabled", "budget_tokens": effort}
 	}
 	if len(req.Tools) > 0 {
 		payload["tools"] = claudeTools(req.Tools)
@@ -588,6 +598,9 @@ func prepareServerGeminiGenerateContentRequest(channel *model.Channel, upstreamM
 	}
 	if req.Temperature != nil {
 		generationConfig["temperature"] = *req.Temperature
+	}
+	if effort := normalizeReasoningEffort(req.ReasoningEffort); effort != "" {
+		generationConfig["thinkingConfig"] = map[string]interface{}{"thinkingBudget": geminiThinkingBudget(effort)}
 	}
 	if len(generationConfig) > 0 {
 		payload["generationConfig"] = generationConfig
@@ -1179,6 +1192,51 @@ func toolSchema(tool ChatExecutorTool) map[string]interface{} {
 		return tool.Schema
 	}
 	return map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
+}
+
+func normalizeReasoningEffort(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "minimal":
+		return "minimal"
+	case "low":
+		return "low"
+	case "medium":
+		return "medium"
+	case "high":
+		return "high"
+	default:
+		return ""
+	}
+}
+
+func claudeThinkingEffort(value string) int {
+	switch normalizeReasoningEffort(value) {
+	case "minimal":
+		return 1024
+	case "low":
+		return 2048
+	case "medium":
+		return 4096
+	case "high":
+		return 8192
+	default:
+		return 0
+	}
+}
+
+func geminiThinkingBudget(value string) int {
+	switch normalizeReasoningEffort(value) {
+	case "minimal":
+		return 512
+	case "low":
+		return 1024
+	case "medium":
+		return 4096
+	case "high":
+		return 8192
+	default:
+		return 0
+	}
 }
 
 func toolCallsFromOpenAIInterface(raw interface{}) []ChatExecutorToolCall {
