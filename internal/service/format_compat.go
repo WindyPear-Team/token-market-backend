@@ -197,7 +197,7 @@ func (s *ProxyService) handleCompatibleJSONGeneration(c *gin.Context, opts compa
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "type": "invalid_request"})
 		return
 	}
-	resp, err := s.doUpstreamRequest(prepared)
+	resp, err := s.doUpstreamRequest(prepared, &target.Channel)
 	if err != nil {
 		logUpstreamRequestFailure(c, &target.Channel, prepared.URL, prepared.Body, err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Upstream request failed", "type": "upstream_error"})
@@ -425,7 +425,7 @@ func (s *ProxyService) fetchCompatibleTask(c *gin.Context, channel *model.Channe
 		Header:  headers,
 		Context: c.Request.Context(),
 	}
-	resp, err := s.doUpstreamRequest(prepared)
+	resp, err := s.doUpstreamRequest(prepared, channel)
 	if err != nil {
 		logUpstreamRequestFailure(c, channel, prepared.URL, nil, err)
 		c.JSON(http.StatusBadGateway, authErrorResponse(http.StatusBadGateway, "Bad gateway. The server is temporarily unavailable", "bad_gateway"))
@@ -621,7 +621,7 @@ func (s *ProxyService) prepareRawCompatibleRequest(c *gin.Context, target *proxy
 }
 
 func (s *ProxyService) readCompatibleUpstreamResponse(c *gin.Context, target *proxyTarget, prepared preparedUpstreamRequest) (*http.Response, []byte, bool) {
-	resp, err := s.doUpstreamRequest(prepared)
+	resp, err := s.doUpstreamRequest(prepared, &target.Channel)
 	if err != nil {
 		logUpstreamRequestFailure(c, &target.Channel, prepared.URL, prepared.Body, err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Upstream request failed", "type": "upstream_error"})

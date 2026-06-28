@@ -220,7 +220,7 @@ func (s *ProxyService) createVideoUpstreamGeneration(c *gin.Context, requestBody
 		return videoGenerationResult{}, false
 	}
 
-	resp, err := s.doUpstreamRequest(prepared)
+	resp, err := s.doUpstreamRequest(prepared, &target.Channel)
 	if err != nil {
 		logUpstreamRequestFailure(c, &target.Channel, prepared.URL, prepared.Body, err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Upstream request failed", "type": "upstream_error"})
@@ -343,7 +343,7 @@ func (s *ProxyService) HandleImageGeneration(c *gin.Context) {
 		return
 	}
 
-	resp, err := s.doUpstreamRequest(prepared)
+	resp, err := s.doUpstreamRequest(prepared, &target.Channel)
 	if err != nil {
 		logUpstreamRequestFailure(c, &target.Channel, prepared.URL, prepared.Body, err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Upstream request failed", "type": "upstream_error"})
@@ -446,7 +446,7 @@ func (s *ProxyService) HandleImageEdit(c *gin.Context) {
 		return
 	}
 
-	resp, err := s.doUpstreamRequest(prepared)
+	resp, err := s.doUpstreamRequest(prepared, &target.Channel)
 	if err != nil {
 		logUpstreamRequestFailure(c, &target.Channel, prepared.URL, nil, err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Upstream request failed", "type": "upstream_error"})
@@ -662,7 +662,7 @@ func (s *ProxyService) fetchUpstreamVideoTask(c *gin.Context, channel *model.Cha
 		URL:    upstreamURLForRequest(channel.BaseURL, videoTaskStatusPath(upstreamProtocol, upstreamTaskID)),
 		Header: headers,
 	}
-	resp, err := s.doUpstreamRequest(prepared)
+	resp, err := s.doUpstreamRequest(prepared, channel)
 	if err != nil {
 		logUpstreamRequestFailure(c, channel, prepared.URL, nil, err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Upstream request failed", "type": "upstream_error"})
@@ -964,7 +964,7 @@ func (s *ProxyService) handleConvertedProviderRequest(c *gin.Context, clientProt
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "type": "invalid_request"})
 		return
 	}
-	resp, err := s.doUpstreamRequest(prepared)
+	resp, err := s.doUpstreamRequest(prepared, &target.Channel)
 	if err != nil {
 		logUpstreamRequestFailure(c, &target.Channel, prepared.URL, prepared.Body, err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Upstream request failed", "type": "upstream_error"})
@@ -1720,7 +1720,7 @@ func (s *ProxyService) forwardToUpstream(channel *model.Channel, method, path st
 	return client.Do(req)
 }
 
-func (s *ProxyService) doUpstreamRequest(prepared preparedUpstreamRequest) (*http.Response, error) {
+func (s *ProxyService) doUpstreamRequest(prepared preparedUpstreamRequest, channel *model.Channel) (*http.Response, error) {
 	ctx := prepared.Context
 	if ctx == nil {
 		ctx = context.Background()
@@ -1733,7 +1733,9 @@ func (s *ProxyService) doUpstreamRequest(prepared preparedUpstreamRequest) (*htt
 		req.Header[key] = values
 	}
 	client := &http.Client{Timeout: 60 * time.Second}
-	return client.Do(req)
+	resp, err := client.Do(req)
+	recordUpstreamResult(channel, resp, err)
+	return resp, err
 }
 
 func rawProviderRequest(channel *model.Channel, protocol proxyProtocol, method, path string, body []byte, originalHeader http.Header) preparedUpstreamRequest {

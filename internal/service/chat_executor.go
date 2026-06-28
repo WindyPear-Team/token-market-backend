@@ -151,7 +151,7 @@ func ExecuteServerChatCompletion(c *gin.Context, user *model.User, req ChatExecu
 		prepared.Context = c.Request.Context()
 	}
 
-	resp, err := executor.doUpstreamRequest(prepared)
+	resp, err := executor.doUpstreamRequest(prepared, &channel)
 	if err != nil {
 		logUpstreamRequestFailure(c, &channel, prepared.URL, prepared.Body, err)
 		return nil, newChatExecutorError(http.StatusBadGateway, "Upstream request failed")

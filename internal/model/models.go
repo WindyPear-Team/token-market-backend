@@ -200,21 +200,28 @@ type ReferralCommissionLog struct {
 
 // Channel represents an upstream API provider
 type Channel struct {
-	ID               uint                     `gorm:"primaryKey" json:"id"`
-	UserChannelID    *uint                    `gorm:"index" json:"user_channel_id"`
-	UserChannel      UserChannel              `gorm:"foreignKey:UserChannelID" json:"user_channel"`
-	Name             string                   `gorm:"size:100" json:"name"`
-	Type             string                   `gorm:"size:50" json:"type"` // openai, claude
-	BaseURL          string                   `gorm:"size:255" json:"base_url"`
-	APIKey           string                   `gorm:"size:255" json:"api_key"`
-	Multiplier       decimal.Decimal          `gorm:"type:decimal(10,4);default:1.0" json:"multiplier"`
-	Priority         int                      `gorm:"default:1" json:"priority"`
-	Weight           int                      `gorm:"default:1" json:"weight"`
-	Enabled          bool                     `gorm:"default:true" json:"enabled"`
-	CreatedAt        time.Time                `json:"created_at"`
-	UpdatedAt        time.Time                `json:"updated_at"`
-	Models           []ModelConfig            `gorm:"foreignKey:ChannelID" json:"models"`
-	GroupMultipliers []ChannelGroupMultiplier `gorm:"foreignKey:ChannelID" json:"group_multipliers,omitempty"`
+	ID                  uint                     `gorm:"primaryKey" json:"id"`
+	UserChannelID       *uint                    `gorm:"index" json:"user_channel_id"`
+	UserChannel         UserChannel              `gorm:"foreignKey:UserChannelID" json:"user_channel"`
+	Name                string                   `gorm:"size:100" json:"name"`
+	Type                string                   `gorm:"size:50" json:"type"` // openai, claude
+	BaseURL             string                   `gorm:"size:255" json:"base_url"`
+	APIKey              string                   `gorm:"size:255" json:"api_key"`
+	Multiplier          decimal.Decimal          `gorm:"type:decimal(10,4);default:1.0" json:"multiplier"`
+	Priority            int                      `gorm:"default:1" json:"priority"`
+	Weight              int                      `gorm:"default:1" json:"weight"`
+	Enabled             bool                     `gorm:"default:true" json:"enabled"`
+	ConsecutiveFailures int                      `gorm:"default:0" json:"consecutive_failures"`
+	LastFailureAt       *time.Time               `json:"last_failure_at"`
+	LastFailureReason   string                   `gorm:"size:500" json:"last_failure_reason"`
+	AutoDisabledAt      *time.Time               `json:"auto_disabled_at"`
+	AutoDisabledReason  string                   `gorm:"size:500" json:"auto_disabled_reason"`
+	LastHealthCheckedAt *time.Time               `json:"last_health_checked_at"`
+	LastHealthStatus    string                   `gorm:"size:20" json:"last_health_status"`
+	CreatedAt           time.Time                `json:"created_at"`
+	UpdatedAt           time.Time                `json:"updated_at"`
+	Models              []ModelConfig            `gorm:"foreignKey:ChannelID" json:"models"`
+	GroupMultipliers    []ChannelGroupMultiplier `gorm:"foreignKey:ChannelID" json:"group_multipliers,omitempty"`
 }
 
 // Model represents a global model identity. It is not bound to any upstream channel.

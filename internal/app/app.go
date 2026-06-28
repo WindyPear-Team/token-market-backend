@@ -39,11 +39,13 @@ func Run() error {
 	proxyService := service.NewProxyService()
 	syncService := service.NewSyncService()
 	statusService := service.NewStatusService()
+	reliabilityService := service.NewReliabilityService()
 	rateLimiter := middleware.NewRateLimiter()
 
 	// Start sync loop
 	syncService.StartSyncLoop()
 	statusService.Start()
+	reliabilityService.Start()
 
 	// Initialize Gin
 	r := gin.Default()

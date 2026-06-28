@@ -28,240 +28,254 @@ const (
 )
 
 type systemSettingsResponse struct {
-	Edition                       string `json:"edition"`
-	SiteName                      string `json:"site_name"`
-	BaseURL                       string `json:"base_url"`
-	IconURL                       string `json:"icon_url"`
-	FooterText                    string `json:"footer_text"`
-	AboutHTML                     string `json:"about_html"`
-	HomeIframeURL                 string `json:"home_iframe_url"`
-	PrivacyPolicy                 string `json:"privacy_policy"`
-	Terms                         string `json:"terms"`
-	PrivacyPolicyURL              string `json:"privacy_policy_url"`
-	TermsURL                      string `json:"terms_url"`
-	AuthAgreementMode             string `json:"auth_agreement_mode"`
-	Announcement                  string `json:"announcement"`
-	TopNavEnabled                 bool   `json:"top_nav_enabled"`
-	TopNavItems                   string `json:"top_nav_items"`
-	PageLayouts                   string `json:"page_layouts"`
-	ThemeLightBackground          string `json:"theme_light_background"`
-	ThemeLightForeground          string `json:"theme_light_foreground"`
-	ThemeLightCard                string `json:"theme_light_card"`
-	ThemeLightCardForeground      string `json:"theme_light_card_foreground"`
-	ThemeLightPrimary             string `json:"theme_light_primary"`
-	ThemeLightPrimaryForeground   string `json:"theme_light_primary_foreground"`
-	ThemeLightSecondary           string `json:"theme_light_secondary"`
-	ThemeLightSecondaryForeground string `json:"theme_light_secondary_foreground"`
-	ThemeLightAccent              string `json:"theme_light_accent"`
-	ThemeLightAccentForeground    string `json:"theme_light_accent_foreground"`
-	ThemeLightMuted               string `json:"theme_light_muted"`
-	ThemeLightMutedForeground     string `json:"theme_light_muted_foreground"`
-	ThemeLightBorder              string `json:"theme_light_border"`
-	ThemeDarkBackground           string `json:"theme_dark_background"`
-	ThemeDarkForeground           string `json:"theme_dark_foreground"`
-	ThemeDarkCard                 string `json:"theme_dark_card"`
-	ThemeDarkCardForeground       string `json:"theme_dark_card_foreground"`
-	ThemeDarkPrimary              string `json:"theme_dark_primary"`
-	ThemeDarkPrimaryForeground    string `json:"theme_dark_primary_foreground"`
-	ThemeDarkSecondary            string `json:"theme_dark_secondary"`
-	ThemeDarkSecondaryForeground  string `json:"theme_dark_secondary_foreground"`
-	ThemeDarkAccent               string `json:"theme_dark_accent"`
-	ThemeDarkAccentForeground     string `json:"theme_dark_accent_foreground"`
-	ThemeDarkMuted                string `json:"theme_dark_muted"`
-	ThemeDarkMutedForeground      string `json:"theme_dark_muted_foreground"`
-	ThemeDarkBorder               string `json:"theme_dark_border"`
-	SidebarDashboardEnabled       bool   `json:"sidebar_dashboard_enabled"`
-	SidebarUsageEnabled           bool   `json:"sidebar_usage_enabled"`
-	SidebarWalletEnabled          bool   `json:"sidebar_wallet_enabled"`
-	SidebarDataBoardEnabled       bool   `json:"sidebar_data_board_enabled"`
-	SidebarAPIKeysEnabled         bool   `json:"sidebar_api_keys_enabled"`
-	SidebarChatEnabled            bool   `json:"sidebar_chat_enabled"`
-	SidebarImagesEnabled          bool   `json:"sidebar_images_enabled"`
-	SidebarSettingsEnabled        bool   `json:"sidebar_settings_enabled"`
-	SidebarSystemEnabled          bool   `json:"sidebar_system_enabled"`
-	SidebarAdminOverviewEnabled   bool   `json:"sidebar_admin_overview_enabled"`
-	SidebarChannelsEnabled        bool   `json:"sidebar_channels_enabled"`
-	SidebarModelsEnabled          bool   `json:"sidebar_models_enabled"`
-	SidebarUsersEnabled           bool   `json:"sidebar_users_enabled"`
-	ChatPageMode                  string `json:"chat_page_mode"`
-	MessageChannelEnabled         bool   `json:"message_channel_enabled"`
-	ReferralEnabled               bool   `json:"referral_enabled"`
-	ReferralCommissionRate        string `json:"referral_commission_rate"`
-	GroupMultiplierMode           string `json:"group_multiplier_mode"`
-	PricingEndpointEnabled        bool   `json:"pricing_endpoint_enabled"`
-	StatusMonitorEnabled          bool   `json:"status_monitor_enabled"`
-	CheckInEnabled                bool   `json:"checkin_enabled"`
-	CheckInDailyReward            string `json:"checkin_daily_reward"`
-	CheckInTimezone               string `json:"checkin_timezone"`
-	CheckInStreakEnabled          bool   `json:"checkin_streak_enabled"`
-	CheckInStreakCycleDays        string `json:"checkin_streak_cycle_days"`
-	CheckInStreakRewards          string `json:"checkin_streak_rewards"`
-	CheckInRandomEnabled          bool   `json:"checkin_random_enabled"`
-	CheckInRandomMin              string `json:"checkin_random_min"`
-	CheckInRandomMax              string `json:"checkin_random_max"`
-	PaymentEnabled                bool   `json:"payment_enabled"`
-	PaymentCurrencyDisplayName    string `json:"payment_currency_display_name"`
-	PaymentUSDToRMBRate           string `json:"payment_usd_to_rmb_rate"`
-	PaymentMinRechargeAmount      string `json:"payment_min_recharge_amount"`
-	PaymentRechargePresets        string `json:"payment_recharge_presets"`
-	PaymentMethods                string `json:"payment_methods"`
-	PaymentGatewayProvider        string `json:"payment_gateway_provider"`
-	PaymentYipayGatewayURL        string `json:"payment_yipay_gateway_url,omitempty"`
-	PaymentYipayPID               string `json:"payment_yipay_pid,omitempty"`
-	PaymentYipayKey               string `json:"payment_yipay_key,omitempty"`
-	PaymentYipayNotifyURL         string `json:"payment_yipay_notify_url,omitempty"`
-	PaymentYipayReturnURL         string `json:"payment_yipay_return_url,omitempty"`
-	PaymentOpenPaymentBaseURL     string `json:"payment_openpayment_base_url,omitempty"`
-	PaymentOpenPaymentConfigURL   string `json:"payment_openpayment_config_url,omitempty"`
-	PaymentOpenPaymentMerchantID  string `json:"payment_openpayment_merchant_id,omitempty"`
-	PaymentOpenPaymentKey         string `json:"payment_openpayment_key,omitempty"`
-	PaymentOpenPaymentNotifyURL   string `json:"payment_openpayment_notify_url,omitempty"`
-	PaymentOpenPaymentReturnURL   string `json:"payment_openpayment_return_url,omitempty"`
-	RateLimitEnabled              bool   `json:"rate_limit_enabled"`
-	RateLimitRequestsPerMinute    string `json:"rate_limit_requests_per_minute"`
-	RateLimitBurst                string `json:"rate_limit_burst"`
-	SensitiveFilterEnabled        bool   `json:"sensitive_filter_enabled"`
-	SensitiveWords                string `json:"sensitive_words,omitempty"`
-	SensitiveFilterScope          string `json:"sensitive_filter_scope"`
-	SSRFProtectionEnabled         bool   `json:"ssrf_protection_enabled"`
-	SSRFAllowPrivateNetworks      bool   `json:"ssrf_allow_private_networks"`
-	SSRFAllowedHosts              string `json:"ssrf_allowed_hosts,omitempty"`
-	OIDCEnabled                   bool   `json:"oidc_enabled"`
-	PasskeyEnabled                bool   `json:"passkey_enabled"`
-	PasswordLoginEnabled          bool   `json:"password_login_enabled"`
-	PasswordRegistrationEnabled   bool   `json:"password_registration_enabled"`
-	PasswordHCaptchaEnabled       bool   `json:"password_hcaptcha_enabled"`
-	HCaptchaSiteKey               string `json:"hcaptcha_site_key"`
-	HCaptchaSecret                string `json:"hcaptcha_secret,omitempty"`
-	EmailVerificationRequired     bool   `json:"email_verification_required"`
-	SMTPHost                      string `json:"smtp_host,omitempty"`
-	SMTPPort                      string `json:"smtp_port,omitempty"`
-	SMTPUsername                  string `json:"smtp_username,omitempty"`
-	SMTPPassword                  string `json:"smtp_password,omitempty"`
-	SMTPFrom                      string `json:"smtp_from,omitempty"`
-	OIDCIssuer                    string `json:"oidc_issuer,omitempty"`
-	OIDCClientID                  string `json:"oidc_client_id,omitempty"`
-	OIDCClientSecret              string `json:"oidc_client_secret,omitempty"`
-	OIDCRedirectURL               string `json:"oidc_redirect_url,omitempty"`
-	OAuthProviders                string `json:"oauth_providers,omitempty"`
+	Edition                              string `json:"edition"`
+	SiteName                             string `json:"site_name"`
+	BaseURL                              string `json:"base_url"`
+	IconURL                              string `json:"icon_url"`
+	FooterText                           string `json:"footer_text"`
+	AboutHTML                            string `json:"about_html"`
+	HomeIframeURL                        string `json:"home_iframe_url"`
+	PrivacyPolicy                        string `json:"privacy_policy"`
+	Terms                                string `json:"terms"`
+	PrivacyPolicyURL                     string `json:"privacy_policy_url"`
+	TermsURL                             string `json:"terms_url"`
+	AuthAgreementMode                    string `json:"auth_agreement_mode"`
+	Announcement                         string `json:"announcement"`
+	TopNavEnabled                        bool   `json:"top_nav_enabled"`
+	TopNavItems                          string `json:"top_nav_items"`
+	PageLayouts                          string `json:"page_layouts"`
+	ThemeLightBackground                 string `json:"theme_light_background"`
+	ThemeLightForeground                 string `json:"theme_light_foreground"`
+	ThemeLightCard                       string `json:"theme_light_card"`
+	ThemeLightCardForeground             string `json:"theme_light_card_foreground"`
+	ThemeLightPrimary                    string `json:"theme_light_primary"`
+	ThemeLightPrimaryForeground          string `json:"theme_light_primary_foreground"`
+	ThemeLightSecondary                  string `json:"theme_light_secondary"`
+	ThemeLightSecondaryForeground        string `json:"theme_light_secondary_foreground"`
+	ThemeLightAccent                     string `json:"theme_light_accent"`
+	ThemeLightAccentForeground           string `json:"theme_light_accent_foreground"`
+	ThemeLightMuted                      string `json:"theme_light_muted"`
+	ThemeLightMutedForeground            string `json:"theme_light_muted_foreground"`
+	ThemeLightBorder                     string `json:"theme_light_border"`
+	ThemeDarkBackground                  string `json:"theme_dark_background"`
+	ThemeDarkForeground                  string `json:"theme_dark_foreground"`
+	ThemeDarkCard                        string `json:"theme_dark_card"`
+	ThemeDarkCardForeground              string `json:"theme_dark_card_foreground"`
+	ThemeDarkPrimary                     string `json:"theme_dark_primary"`
+	ThemeDarkPrimaryForeground           string `json:"theme_dark_primary_foreground"`
+	ThemeDarkSecondary                   string `json:"theme_dark_secondary"`
+	ThemeDarkSecondaryForeground         string `json:"theme_dark_secondary_foreground"`
+	ThemeDarkAccent                      string `json:"theme_dark_accent"`
+	ThemeDarkAccentForeground            string `json:"theme_dark_accent_foreground"`
+	ThemeDarkMuted                       string `json:"theme_dark_muted"`
+	ThemeDarkMutedForeground             string `json:"theme_dark_muted_foreground"`
+	ThemeDarkBorder                      string `json:"theme_dark_border"`
+	SidebarDashboardEnabled              bool   `json:"sidebar_dashboard_enabled"`
+	SidebarUsageEnabled                  bool   `json:"sidebar_usage_enabled"`
+	SidebarWalletEnabled                 bool   `json:"sidebar_wallet_enabled"`
+	SidebarDataBoardEnabled              bool   `json:"sidebar_data_board_enabled"`
+	SidebarAPIKeysEnabled                bool   `json:"sidebar_api_keys_enabled"`
+	SidebarChatEnabled                   bool   `json:"sidebar_chat_enabled"`
+	SidebarImagesEnabled                 bool   `json:"sidebar_images_enabled"`
+	SidebarSettingsEnabled               bool   `json:"sidebar_settings_enabled"`
+	SidebarSystemEnabled                 bool   `json:"sidebar_system_enabled"`
+	SidebarAdminOverviewEnabled          bool   `json:"sidebar_admin_overview_enabled"`
+	SidebarChannelsEnabled               bool   `json:"sidebar_channels_enabled"`
+	SidebarModelsEnabled                 bool   `json:"sidebar_models_enabled"`
+	SidebarUsersEnabled                  bool   `json:"sidebar_users_enabled"`
+	ChatPageMode                         string `json:"chat_page_mode"`
+	MessageChannelEnabled                bool   `json:"message_channel_enabled"`
+	ReferralEnabled                      bool   `json:"referral_enabled"`
+	ReferralCommissionRate               string `json:"referral_commission_rate"`
+	GroupMultiplierMode                  string `json:"group_multiplier_mode"`
+	PricingEndpointEnabled               bool   `json:"pricing_endpoint_enabled"`
+	StatusMonitorEnabled                 bool   `json:"status_monitor_enabled"`
+	ReliabilityAutoDisableEnabled        bool   `json:"reliability_auto_disable_enabled"`
+	ReliabilityDisableAfterFailures      string `json:"reliability_disable_after_failures"`
+	ReliabilityAutoDetectUpstreamEnabled bool   `json:"reliability_auto_detect_upstream_enabled"`
+	ReliabilityAutoDetectIntervalSeconds string `json:"reliability_auto_detect_interval_seconds"`
+	ReliabilityAutoDetectTimeoutSeconds  string `json:"reliability_auto_detect_timeout_seconds"`
+	ReliabilityAutoRecoverEnabled        bool   `json:"reliability_auto_recover_enabled"`
+	ReliabilityRecoveryAfterSeconds      string `json:"reliability_recovery_after_seconds"`
+	CheckInEnabled                       bool   `json:"checkin_enabled"`
+	CheckInDailyReward                   string `json:"checkin_daily_reward"`
+	CheckInTimezone                      string `json:"checkin_timezone"`
+	CheckInStreakEnabled                 bool   `json:"checkin_streak_enabled"`
+	CheckInStreakCycleDays               string `json:"checkin_streak_cycle_days"`
+	CheckInStreakRewards                 string `json:"checkin_streak_rewards"`
+	CheckInRandomEnabled                 bool   `json:"checkin_random_enabled"`
+	CheckInRandomMin                     string `json:"checkin_random_min"`
+	CheckInRandomMax                     string `json:"checkin_random_max"`
+	PaymentEnabled                       bool   `json:"payment_enabled"`
+	PaymentCurrencyDisplayName           string `json:"payment_currency_display_name"`
+	PaymentUSDToRMBRate                  string `json:"payment_usd_to_rmb_rate"`
+	PaymentMinRechargeAmount             string `json:"payment_min_recharge_amount"`
+	PaymentRechargePresets               string `json:"payment_recharge_presets"`
+	PaymentMethods                       string `json:"payment_methods"`
+	PaymentGatewayProvider               string `json:"payment_gateway_provider"`
+	PaymentYipayGatewayURL               string `json:"payment_yipay_gateway_url,omitempty"`
+	PaymentYipayPID                      string `json:"payment_yipay_pid,omitempty"`
+	PaymentYipayKey                      string `json:"payment_yipay_key,omitempty"`
+	PaymentYipayNotifyURL                string `json:"payment_yipay_notify_url,omitempty"`
+	PaymentYipayReturnURL                string `json:"payment_yipay_return_url,omitempty"`
+	PaymentOpenPaymentBaseURL            string `json:"payment_openpayment_base_url,omitempty"`
+	PaymentOpenPaymentConfigURL          string `json:"payment_openpayment_config_url,omitempty"`
+	PaymentOpenPaymentMerchantID         string `json:"payment_openpayment_merchant_id,omitempty"`
+	PaymentOpenPaymentKey                string `json:"payment_openpayment_key,omitempty"`
+	PaymentOpenPaymentNotifyURL          string `json:"payment_openpayment_notify_url,omitempty"`
+	PaymentOpenPaymentReturnURL          string `json:"payment_openpayment_return_url,omitempty"`
+	RateLimitEnabled                     bool   `json:"rate_limit_enabled"`
+	RateLimitRequestsPerMinute           string `json:"rate_limit_requests_per_minute"`
+	RateLimitBurst                       string `json:"rate_limit_burst"`
+	SensitiveFilterEnabled               bool   `json:"sensitive_filter_enabled"`
+	SensitiveWords                       string `json:"sensitive_words,omitempty"`
+	SensitiveFilterScope                 string `json:"sensitive_filter_scope"`
+	SSRFProtectionEnabled                bool   `json:"ssrf_protection_enabled"`
+	SSRFAllowPrivateNetworks             bool   `json:"ssrf_allow_private_networks"`
+	SSRFAllowedHosts                     string `json:"ssrf_allowed_hosts,omitempty"`
+	OIDCEnabled                          bool   `json:"oidc_enabled"`
+	PasskeyEnabled                       bool   `json:"passkey_enabled"`
+	PasswordLoginEnabled                 bool   `json:"password_login_enabled"`
+	PasswordRegistrationEnabled          bool   `json:"password_registration_enabled"`
+	PasswordHCaptchaEnabled              bool   `json:"password_hcaptcha_enabled"`
+	HCaptchaSiteKey                      string `json:"hcaptcha_site_key"`
+	HCaptchaSecret                       string `json:"hcaptcha_secret,omitempty"`
+	EmailVerificationRequired            bool   `json:"email_verification_required"`
+	SMTPHost                             string `json:"smtp_host,omitempty"`
+	SMTPPort                             string `json:"smtp_port,omitempty"`
+	SMTPUsername                         string `json:"smtp_username,omitempty"`
+	SMTPPassword                         string `json:"smtp_password,omitempty"`
+	SMTPFrom                             string `json:"smtp_from,omitempty"`
+	OIDCIssuer                           string `json:"oidc_issuer,omitempty"`
+	OIDCClientID                         string `json:"oidc_client_id,omitempty"`
+	OIDCClientSecret                     string `json:"oidc_client_secret,omitempty"`
+	OIDCRedirectURL                      string `json:"oidc_redirect_url,omitempty"`
+	OAuthProviders                       string `json:"oauth_providers,omitempty"`
 }
 
 type systemSettingsInput struct {
-	SiteName                      *string `json:"site_name"`
-	BaseURL                       *string `json:"base_url"`
-	IconURL                       *string `json:"icon_url"`
-	FooterText                    *string `json:"footer_text"`
-	AboutHTML                     *string `json:"about_html"`
-	HomeIframeURL                 *string `json:"home_iframe_url"`
-	PrivacyPolicy                 *string `json:"privacy_policy"`
-	Terms                         *string `json:"terms"`
-	PrivacyPolicyURL              *string `json:"privacy_policy_url"`
-	TermsURL                      *string `json:"terms_url"`
-	AuthAgreementMode             *string `json:"auth_agreement_mode"`
-	Announcement                  *string `json:"announcement"`
-	TopNavEnabled                 *bool   `json:"top_nav_enabled"`
-	TopNavItems                   *string `json:"top_nav_items"`
-	PageLayouts                   *string `json:"page_layouts"`
-	ThemeLightBackground          *string `json:"theme_light_background"`
-	ThemeLightForeground          *string `json:"theme_light_foreground"`
-	ThemeLightCard                *string `json:"theme_light_card"`
-	ThemeLightCardForeground      *string `json:"theme_light_card_foreground"`
-	ThemeLightPrimary             *string `json:"theme_light_primary"`
-	ThemeLightPrimaryForeground   *string `json:"theme_light_primary_foreground"`
-	ThemeLightSecondary           *string `json:"theme_light_secondary"`
-	ThemeLightSecondaryForeground *string `json:"theme_light_secondary_foreground"`
-	ThemeLightAccent              *string `json:"theme_light_accent"`
-	ThemeLightAccentForeground    *string `json:"theme_light_accent_foreground"`
-	ThemeLightMuted               *string `json:"theme_light_muted"`
-	ThemeLightMutedForeground     *string `json:"theme_light_muted_foreground"`
-	ThemeLightBorder              *string `json:"theme_light_border"`
-	ThemeDarkBackground           *string `json:"theme_dark_background"`
-	ThemeDarkForeground           *string `json:"theme_dark_foreground"`
-	ThemeDarkCard                 *string `json:"theme_dark_card"`
-	ThemeDarkCardForeground       *string `json:"theme_dark_card_foreground"`
-	ThemeDarkPrimary              *string `json:"theme_dark_primary"`
-	ThemeDarkPrimaryForeground    *string `json:"theme_dark_primary_foreground"`
-	ThemeDarkSecondary            *string `json:"theme_dark_secondary"`
-	ThemeDarkSecondaryForeground  *string `json:"theme_dark_secondary_foreground"`
-	ThemeDarkAccent               *string `json:"theme_dark_accent"`
-	ThemeDarkAccentForeground     *string `json:"theme_dark_accent_foreground"`
-	ThemeDarkMuted                *string `json:"theme_dark_muted"`
-	ThemeDarkMutedForeground      *string `json:"theme_dark_muted_foreground"`
-	ThemeDarkBorder               *string `json:"theme_dark_border"`
-	SidebarDashboardEnabled       *bool   `json:"sidebar_dashboard_enabled"`
-	SidebarUsageEnabled           *bool   `json:"sidebar_usage_enabled"`
-	SidebarWalletEnabled          *bool   `json:"sidebar_wallet_enabled"`
-	SidebarDataBoardEnabled       *bool   `json:"sidebar_data_board_enabled"`
-	SidebarAPIKeysEnabled         *bool   `json:"sidebar_api_keys_enabled"`
-	SidebarChatEnabled            *bool   `json:"sidebar_chat_enabled"`
-	SidebarImagesEnabled          *bool   `json:"sidebar_images_enabled"`
-	SidebarSettingsEnabled        *bool   `json:"sidebar_settings_enabled"`
-	SidebarSystemEnabled          *bool   `json:"sidebar_system_enabled"`
-	SidebarAdminOverviewEnabled   *bool   `json:"sidebar_admin_overview_enabled"`
-	SidebarChannelsEnabled        *bool   `json:"sidebar_channels_enabled"`
-	SidebarModelsEnabled          *bool   `json:"sidebar_models_enabled"`
-	SidebarUsersEnabled           *bool   `json:"sidebar_users_enabled"`
-	ChatPageMode                  *string `json:"chat_page_mode"`
-	MessageChannelEnabled         *bool   `json:"message_channel_enabled"`
-	ReferralEnabled               *bool   `json:"referral_enabled"`
-	ReferralCommissionRate        *string `json:"referral_commission_rate"`
-	GroupMultiplierMode           *string `json:"group_multiplier_mode"`
-	PricingEndpointEnabled        *bool   `json:"pricing_endpoint_enabled"`
-	StatusMonitorEnabled          *bool   `json:"status_monitor_enabled"`
-	CheckInEnabled                *bool   `json:"checkin_enabled"`
-	CheckInDailyReward            *string `json:"checkin_daily_reward"`
-	CheckInTimezone               *string `json:"checkin_timezone"`
-	CheckInStreakEnabled          *bool   `json:"checkin_streak_enabled"`
-	CheckInStreakCycleDays        *string `json:"checkin_streak_cycle_days"`
-	CheckInStreakRewards          *string `json:"checkin_streak_rewards"`
-	CheckInRandomEnabled          *bool   `json:"checkin_random_enabled"`
-	CheckInRandomMin              *string `json:"checkin_random_min"`
-	CheckInRandomMax              *string `json:"checkin_random_max"`
-	PaymentEnabled                *bool   `json:"payment_enabled"`
-	PaymentCurrencyDisplayName    *string `json:"payment_currency_display_name"`
-	PaymentUSDToRMBRate           *string `json:"payment_usd_to_rmb_rate"`
-	PaymentMinRechargeAmount      *string `json:"payment_min_recharge_amount"`
-	PaymentRechargePresets        *string `json:"payment_recharge_presets"`
-	PaymentMethods                *string `json:"payment_methods"`
-	PaymentGatewayProvider        *string `json:"payment_gateway_provider"`
-	PaymentYipayGatewayURL        *string `json:"payment_yipay_gateway_url"`
-	PaymentYipayPID               *string `json:"payment_yipay_pid"`
-	PaymentYipayKey               *string `json:"payment_yipay_key"`
-	PaymentYipayNotifyURL         *string `json:"payment_yipay_notify_url"`
-	PaymentYipayReturnURL         *string `json:"payment_yipay_return_url"`
-	PaymentOpenPaymentBaseURL     *string `json:"payment_openpayment_base_url"`
-	PaymentOpenPaymentConfigURL   *string `json:"payment_openpayment_config_url"`
-	PaymentOpenPaymentMerchantID  *string `json:"payment_openpayment_merchant_id"`
-	PaymentOpenPaymentKey         *string `json:"payment_openpayment_key"`
-	PaymentOpenPaymentNotifyURL   *string `json:"payment_openpayment_notify_url"`
-	PaymentOpenPaymentReturnURL   *string `json:"payment_openpayment_return_url"`
-	RateLimitEnabled              *bool   `json:"rate_limit_enabled"`
-	RateLimitRequestsPerMinute    *string `json:"rate_limit_requests_per_minute"`
-	RateLimitBurst                *string `json:"rate_limit_burst"`
-	SensitiveFilterEnabled        *bool   `json:"sensitive_filter_enabled"`
-	SensitiveWords                *string `json:"sensitive_words"`
-	SensitiveFilterScope          *string `json:"sensitive_filter_scope"`
-	SSRFProtectionEnabled         *bool   `json:"ssrf_protection_enabled"`
-	SSRFAllowPrivateNetworks      *bool   `json:"ssrf_allow_private_networks"`
-	SSRFAllowedHosts              *string `json:"ssrf_allowed_hosts"`
-	OIDCEnabled                   *bool   `json:"oidc_enabled"`
-	PasskeyEnabled                *bool   `json:"passkey_enabled"`
-	PasswordLoginEnabled          *bool   `json:"password_login_enabled"`
-	PasswordRegistrationEnabled   *bool   `json:"password_registration_enabled"`
-	PasswordHCaptchaEnabled       *bool   `json:"password_hcaptcha_enabled"`
-	HCaptchaSiteKey               *string `json:"hcaptcha_site_key"`
-	HCaptchaSecret                *string `json:"hcaptcha_secret"`
-	EmailVerificationRequired     *bool   `json:"email_verification_required"`
-	SMTPHost                      *string `json:"smtp_host"`
-	SMTPPort                      *string `json:"smtp_port"`
-	SMTPUsername                  *string `json:"smtp_username"`
-	SMTPPassword                  *string `json:"smtp_password"`
-	SMTPFrom                      *string `json:"smtp_from"`
-	OIDCIssuer                    *string `json:"oidc_issuer"`
-	OIDCClientID                  *string `json:"oidc_client_id"`
-	OIDCClientSecret              *string `json:"oidc_client_secret"`
-	OIDCRedirectURL               *string `json:"oidc_redirect_url"`
-	OAuthProviders                *string `json:"oauth_providers"`
+	SiteName                             *string `json:"site_name"`
+	BaseURL                              *string `json:"base_url"`
+	IconURL                              *string `json:"icon_url"`
+	FooterText                           *string `json:"footer_text"`
+	AboutHTML                            *string `json:"about_html"`
+	HomeIframeURL                        *string `json:"home_iframe_url"`
+	PrivacyPolicy                        *string `json:"privacy_policy"`
+	Terms                                *string `json:"terms"`
+	PrivacyPolicyURL                     *string `json:"privacy_policy_url"`
+	TermsURL                             *string `json:"terms_url"`
+	AuthAgreementMode                    *string `json:"auth_agreement_mode"`
+	Announcement                         *string `json:"announcement"`
+	TopNavEnabled                        *bool   `json:"top_nav_enabled"`
+	TopNavItems                          *string `json:"top_nav_items"`
+	PageLayouts                          *string `json:"page_layouts"`
+	ThemeLightBackground                 *string `json:"theme_light_background"`
+	ThemeLightForeground                 *string `json:"theme_light_foreground"`
+	ThemeLightCard                       *string `json:"theme_light_card"`
+	ThemeLightCardForeground             *string `json:"theme_light_card_foreground"`
+	ThemeLightPrimary                    *string `json:"theme_light_primary"`
+	ThemeLightPrimaryForeground          *string `json:"theme_light_primary_foreground"`
+	ThemeLightSecondary                  *string `json:"theme_light_secondary"`
+	ThemeLightSecondaryForeground        *string `json:"theme_light_secondary_foreground"`
+	ThemeLightAccent                     *string `json:"theme_light_accent"`
+	ThemeLightAccentForeground           *string `json:"theme_light_accent_foreground"`
+	ThemeLightMuted                      *string `json:"theme_light_muted"`
+	ThemeLightMutedForeground            *string `json:"theme_light_muted_foreground"`
+	ThemeLightBorder                     *string `json:"theme_light_border"`
+	ThemeDarkBackground                  *string `json:"theme_dark_background"`
+	ThemeDarkForeground                  *string `json:"theme_dark_foreground"`
+	ThemeDarkCard                        *string `json:"theme_dark_card"`
+	ThemeDarkCardForeground              *string `json:"theme_dark_card_foreground"`
+	ThemeDarkPrimary                     *string `json:"theme_dark_primary"`
+	ThemeDarkPrimaryForeground           *string `json:"theme_dark_primary_foreground"`
+	ThemeDarkSecondary                   *string `json:"theme_dark_secondary"`
+	ThemeDarkSecondaryForeground         *string `json:"theme_dark_secondary_foreground"`
+	ThemeDarkAccent                      *string `json:"theme_dark_accent"`
+	ThemeDarkAccentForeground            *string `json:"theme_dark_accent_foreground"`
+	ThemeDarkMuted                       *string `json:"theme_dark_muted"`
+	ThemeDarkMutedForeground             *string `json:"theme_dark_muted_foreground"`
+	ThemeDarkBorder                      *string `json:"theme_dark_border"`
+	SidebarDashboardEnabled              *bool   `json:"sidebar_dashboard_enabled"`
+	SidebarUsageEnabled                  *bool   `json:"sidebar_usage_enabled"`
+	SidebarWalletEnabled                 *bool   `json:"sidebar_wallet_enabled"`
+	SidebarDataBoardEnabled              *bool   `json:"sidebar_data_board_enabled"`
+	SidebarAPIKeysEnabled                *bool   `json:"sidebar_api_keys_enabled"`
+	SidebarChatEnabled                   *bool   `json:"sidebar_chat_enabled"`
+	SidebarImagesEnabled                 *bool   `json:"sidebar_images_enabled"`
+	SidebarSettingsEnabled               *bool   `json:"sidebar_settings_enabled"`
+	SidebarSystemEnabled                 *bool   `json:"sidebar_system_enabled"`
+	SidebarAdminOverviewEnabled          *bool   `json:"sidebar_admin_overview_enabled"`
+	SidebarChannelsEnabled               *bool   `json:"sidebar_channels_enabled"`
+	SidebarModelsEnabled                 *bool   `json:"sidebar_models_enabled"`
+	SidebarUsersEnabled                  *bool   `json:"sidebar_users_enabled"`
+	ChatPageMode                         *string `json:"chat_page_mode"`
+	MessageChannelEnabled                *bool   `json:"message_channel_enabled"`
+	ReferralEnabled                      *bool   `json:"referral_enabled"`
+	ReferralCommissionRate               *string `json:"referral_commission_rate"`
+	GroupMultiplierMode                  *string `json:"group_multiplier_mode"`
+	PricingEndpointEnabled               *bool   `json:"pricing_endpoint_enabled"`
+	StatusMonitorEnabled                 *bool   `json:"status_monitor_enabled"`
+	ReliabilityAutoDisableEnabled        *bool   `json:"reliability_auto_disable_enabled"`
+	ReliabilityDisableAfterFailures      *string `json:"reliability_disable_after_failures"`
+	ReliabilityAutoDetectUpstreamEnabled *bool   `json:"reliability_auto_detect_upstream_enabled"`
+	ReliabilityAutoDetectIntervalSeconds *string `json:"reliability_auto_detect_interval_seconds"`
+	ReliabilityAutoDetectTimeoutSeconds  *string `json:"reliability_auto_detect_timeout_seconds"`
+	ReliabilityAutoRecoverEnabled        *bool   `json:"reliability_auto_recover_enabled"`
+	ReliabilityRecoveryAfterSeconds      *string `json:"reliability_recovery_after_seconds"`
+	CheckInEnabled                       *bool   `json:"checkin_enabled"`
+	CheckInDailyReward                   *string `json:"checkin_daily_reward"`
+	CheckInTimezone                      *string `json:"checkin_timezone"`
+	CheckInStreakEnabled                 *bool   `json:"checkin_streak_enabled"`
+	CheckInStreakCycleDays               *string `json:"checkin_streak_cycle_days"`
+	CheckInStreakRewards                 *string `json:"checkin_streak_rewards"`
+	CheckInRandomEnabled                 *bool   `json:"checkin_random_enabled"`
+	CheckInRandomMin                     *string `json:"checkin_random_min"`
+	CheckInRandomMax                     *string `json:"checkin_random_max"`
+	PaymentEnabled                       *bool   `json:"payment_enabled"`
+	PaymentCurrencyDisplayName           *string `json:"payment_currency_display_name"`
+	PaymentUSDToRMBRate                  *string `json:"payment_usd_to_rmb_rate"`
+	PaymentMinRechargeAmount             *string `json:"payment_min_recharge_amount"`
+	PaymentRechargePresets               *string `json:"payment_recharge_presets"`
+	PaymentMethods                       *string `json:"payment_methods"`
+	PaymentGatewayProvider               *string `json:"payment_gateway_provider"`
+	PaymentYipayGatewayURL               *string `json:"payment_yipay_gateway_url"`
+	PaymentYipayPID                      *string `json:"payment_yipay_pid"`
+	PaymentYipayKey                      *string `json:"payment_yipay_key"`
+	PaymentYipayNotifyURL                *string `json:"payment_yipay_notify_url"`
+	PaymentYipayReturnURL                *string `json:"payment_yipay_return_url"`
+	PaymentOpenPaymentBaseURL            *string `json:"payment_openpayment_base_url"`
+	PaymentOpenPaymentConfigURL          *string `json:"payment_openpayment_config_url"`
+	PaymentOpenPaymentMerchantID         *string `json:"payment_openpayment_merchant_id"`
+	PaymentOpenPaymentKey                *string `json:"payment_openpayment_key"`
+	PaymentOpenPaymentNotifyURL          *string `json:"payment_openpayment_notify_url"`
+	PaymentOpenPaymentReturnURL          *string `json:"payment_openpayment_return_url"`
+	RateLimitEnabled                     *bool   `json:"rate_limit_enabled"`
+	RateLimitRequestsPerMinute           *string `json:"rate_limit_requests_per_minute"`
+	RateLimitBurst                       *string `json:"rate_limit_burst"`
+	SensitiveFilterEnabled               *bool   `json:"sensitive_filter_enabled"`
+	SensitiveWords                       *string `json:"sensitive_words"`
+	SensitiveFilterScope                 *string `json:"sensitive_filter_scope"`
+	SSRFProtectionEnabled                *bool   `json:"ssrf_protection_enabled"`
+	SSRFAllowPrivateNetworks             *bool   `json:"ssrf_allow_private_networks"`
+	SSRFAllowedHosts                     *string `json:"ssrf_allowed_hosts"`
+	OIDCEnabled                          *bool   `json:"oidc_enabled"`
+	PasskeyEnabled                       *bool   `json:"passkey_enabled"`
+	PasswordLoginEnabled                 *bool   `json:"password_login_enabled"`
+	PasswordRegistrationEnabled          *bool   `json:"password_registration_enabled"`
+	PasswordHCaptchaEnabled              *bool   `json:"password_hcaptcha_enabled"`
+	HCaptchaSiteKey                      *string `json:"hcaptcha_site_key"`
+	HCaptchaSecret                       *string `json:"hcaptcha_secret"`
+	EmailVerificationRequired            *bool   `json:"email_verification_required"`
+	SMTPHost                             *string `json:"smtp_host"`
+	SMTPPort                             *string `json:"smtp_port"`
+	SMTPUsername                         *string `json:"smtp_username"`
+	SMTPPassword                         *string `json:"smtp_password"`
+	SMTPFrom                             *string `json:"smtp_from"`
+	OIDCIssuer                           *string `json:"oidc_issuer"`
+	OIDCClientID                         *string `json:"oidc_client_id"`
+	OIDCClientSecret                     *string `json:"oidc_client_secret"`
+	OIDCRedirectURL                      *string `json:"oidc_redirect_url"`
+	OAuthProviders                       *string `json:"oauth_providers"`
 }
 
 func (api *SystemAPI) PublicSettings(c *gin.Context) {
@@ -332,84 +346,88 @@ func (api *SystemAPI) UpdateSettings(c *gin.Context) {
 	}
 
 	stringSettings := map[string]*string{
-		"base_url":                         input.BaseURL,
-		"icon_url":                         input.IconURL,
-		"footer_text":                      input.FooterText,
-		"about_html":                       input.AboutHTML,
-		"home_iframe_url":                  input.HomeIframeURL,
-		"privacy_policy":                   input.PrivacyPolicy,
-		"terms":                            input.Terms,
-		"privacy_policy_url":               input.PrivacyPolicyURL,
-		"terms_url":                        input.TermsURL,
-		"announcement":                     input.Announcement,
-		"top_nav_items":                    input.TopNavItems,
-		"page_layouts":                     input.PageLayouts,
-		"theme_light_background":           input.ThemeLightBackground,
-		"theme_light_foreground":           input.ThemeLightForeground,
-		"theme_light_card":                 input.ThemeLightCard,
-		"theme_light_card_foreground":      input.ThemeLightCardForeground,
-		"theme_light_primary":              input.ThemeLightPrimary,
-		"theme_light_primary_foreground":   input.ThemeLightPrimaryForeground,
-		"theme_light_secondary":            input.ThemeLightSecondary,
-		"theme_light_secondary_foreground": input.ThemeLightSecondaryForeground,
-		"theme_light_accent":               input.ThemeLightAccent,
-		"theme_light_accent_foreground":    input.ThemeLightAccentForeground,
-		"theme_light_muted":                input.ThemeLightMuted,
-		"theme_light_muted_foreground":     input.ThemeLightMutedForeground,
-		"theme_light_border":               input.ThemeLightBorder,
-		"theme_dark_background":            input.ThemeDarkBackground,
-		"theme_dark_foreground":            input.ThemeDarkForeground,
-		"theme_dark_card":                  input.ThemeDarkCard,
-		"theme_dark_card_foreground":       input.ThemeDarkCardForeground,
-		"theme_dark_primary":               input.ThemeDarkPrimary,
-		"theme_dark_primary_foreground":    input.ThemeDarkPrimaryForeground,
-		"theme_dark_secondary":             input.ThemeDarkSecondary,
-		"theme_dark_secondary_foreground":  input.ThemeDarkSecondaryForeground,
-		"theme_dark_accent":                input.ThemeDarkAccent,
-		"theme_dark_accent_foreground":     input.ThemeDarkAccentForeground,
-		"theme_dark_muted":                 input.ThemeDarkMuted,
-		"theme_dark_muted_foreground":      input.ThemeDarkMutedForeground,
-		"theme_dark_border":                input.ThemeDarkBorder,
-		"oidc_issuer":                      input.OIDCIssuer,
-		"oidc_client_id":                   input.OIDCClientID,
-		"oidc_client_secret":               input.OIDCClientSecret,
-		"oidc_redirect_url":                input.OIDCRedirectURL,
-		"oauth_providers":                  oauthProvidersValue,
-		"referral_commission_rate":         input.ReferralCommissionRate,
-		"group_multiplier_mode":            input.GroupMultiplierMode,
-		"checkin_daily_reward":             input.CheckInDailyReward,
-		"checkin_timezone":                 input.CheckInTimezone,
-		"checkin_streak_cycle_days":        input.CheckInStreakCycleDays,
-		"checkin_streak_rewards":           input.CheckInStreakRewards,
-		"checkin_random_min":               input.CheckInRandomMin,
-		"checkin_random_max":               input.CheckInRandomMax,
-		"payment_currency_display_name":    input.PaymentCurrencyDisplayName,
-		"payment_usd_to_rmb_rate":          input.PaymentUSDToRMBRate,
-		"payment_min_recharge_amount":      input.PaymentMinRechargeAmount,
-		"payment_recharge_presets":         input.PaymentRechargePresets,
-		"payment_methods":                  input.PaymentMethods,
-		"payment_gateway_provider":         input.PaymentGatewayProvider,
-		"payment_yipay_gateway_url":        input.PaymentYipayGatewayURL,
-		"payment_yipay_pid":                input.PaymentYipayPID,
-		"payment_yipay_key":                input.PaymentYipayKey,
-		"payment_yipay_notify_url":         input.PaymentYipayNotifyURL,
-		"payment_yipay_return_url":         input.PaymentYipayReturnURL,
-		"payment_openpayment_base_url":     input.PaymentOpenPaymentBaseURL,
-		"payment_openpayment_config_url":   input.PaymentOpenPaymentConfigURL,
-		"payment_openpayment_merchant_id":  input.PaymentOpenPaymentMerchantID,
-		"payment_openpayment_key":          input.PaymentOpenPaymentKey,
-		"rate_limit_requests_per_minute":   input.RateLimitRequestsPerMinute,
-		"rate_limit_burst":                 input.RateLimitBurst,
-		"sensitive_words":                  input.SensitiveWords,
-		"sensitive_filter_scope":           input.SensitiveFilterScope,
-		"ssrf_allowed_hosts":               input.SSRFAllowedHosts,
-		"hcaptcha_site_key":                input.HCaptchaSiteKey,
-		"hcaptcha_secret":                  input.HCaptchaSecret,
-		"smtp_host":                        input.SMTPHost,
-		"smtp_port":                        input.SMTPPort,
-		"smtp_username":                    input.SMTPUsername,
-		"smtp_password":                    input.SMTPPassword,
-		"smtp_from":                        input.SMTPFrom,
+		"base_url":                                 input.BaseURL,
+		"icon_url":                                 input.IconURL,
+		"footer_text":                              input.FooterText,
+		"about_html":                               input.AboutHTML,
+		"home_iframe_url":                          input.HomeIframeURL,
+		"privacy_policy":                           input.PrivacyPolicy,
+		"terms":                                    input.Terms,
+		"privacy_policy_url":                       input.PrivacyPolicyURL,
+		"terms_url":                                input.TermsURL,
+		"announcement":                             input.Announcement,
+		"top_nav_items":                            input.TopNavItems,
+		"page_layouts":                             input.PageLayouts,
+		"theme_light_background":                   input.ThemeLightBackground,
+		"theme_light_foreground":                   input.ThemeLightForeground,
+		"theme_light_card":                         input.ThemeLightCard,
+		"theme_light_card_foreground":              input.ThemeLightCardForeground,
+		"theme_light_primary":                      input.ThemeLightPrimary,
+		"theme_light_primary_foreground":           input.ThemeLightPrimaryForeground,
+		"theme_light_secondary":                    input.ThemeLightSecondary,
+		"theme_light_secondary_foreground":         input.ThemeLightSecondaryForeground,
+		"theme_light_accent":                       input.ThemeLightAccent,
+		"theme_light_accent_foreground":            input.ThemeLightAccentForeground,
+		"theme_light_muted":                        input.ThemeLightMuted,
+		"theme_light_muted_foreground":             input.ThemeLightMutedForeground,
+		"theme_light_border":                       input.ThemeLightBorder,
+		"theme_dark_background":                    input.ThemeDarkBackground,
+		"theme_dark_foreground":                    input.ThemeDarkForeground,
+		"theme_dark_card":                          input.ThemeDarkCard,
+		"theme_dark_card_foreground":               input.ThemeDarkCardForeground,
+		"theme_dark_primary":                       input.ThemeDarkPrimary,
+		"theme_dark_primary_foreground":            input.ThemeDarkPrimaryForeground,
+		"theme_dark_secondary":                     input.ThemeDarkSecondary,
+		"theme_dark_secondary_foreground":          input.ThemeDarkSecondaryForeground,
+		"theme_dark_accent":                        input.ThemeDarkAccent,
+		"theme_dark_accent_foreground":             input.ThemeDarkAccentForeground,
+		"theme_dark_muted":                         input.ThemeDarkMuted,
+		"theme_dark_muted_foreground":              input.ThemeDarkMutedForeground,
+		"theme_dark_border":                        input.ThemeDarkBorder,
+		"oidc_issuer":                              input.OIDCIssuer,
+		"oidc_client_id":                           input.OIDCClientID,
+		"oidc_client_secret":                       input.OIDCClientSecret,
+		"oidc_redirect_url":                        input.OIDCRedirectURL,
+		"oauth_providers":                          oauthProvidersValue,
+		"referral_commission_rate":                 input.ReferralCommissionRate,
+		"group_multiplier_mode":                    input.GroupMultiplierMode,
+		"reliability_disable_after_failures":       input.ReliabilityDisableAfterFailures,
+		"reliability_auto_detect_interval_seconds": input.ReliabilityAutoDetectIntervalSeconds,
+		"reliability_auto_detect_timeout_seconds":  input.ReliabilityAutoDetectTimeoutSeconds,
+		"reliability_recovery_after_seconds":       input.ReliabilityRecoveryAfterSeconds,
+		"checkin_daily_reward":                     input.CheckInDailyReward,
+		"checkin_timezone":                         input.CheckInTimezone,
+		"checkin_streak_cycle_days":                input.CheckInStreakCycleDays,
+		"checkin_streak_rewards":                   input.CheckInStreakRewards,
+		"checkin_random_min":                       input.CheckInRandomMin,
+		"checkin_random_max":                       input.CheckInRandomMax,
+		"payment_currency_display_name":            input.PaymentCurrencyDisplayName,
+		"payment_usd_to_rmb_rate":                  input.PaymentUSDToRMBRate,
+		"payment_min_recharge_amount":              input.PaymentMinRechargeAmount,
+		"payment_recharge_presets":                 input.PaymentRechargePresets,
+		"payment_methods":                          input.PaymentMethods,
+		"payment_gateway_provider":                 input.PaymentGatewayProvider,
+		"payment_yipay_gateway_url":                input.PaymentYipayGatewayURL,
+		"payment_yipay_pid":                        input.PaymentYipayPID,
+		"payment_yipay_key":                        input.PaymentYipayKey,
+		"payment_yipay_notify_url":                 input.PaymentYipayNotifyURL,
+		"payment_yipay_return_url":                 input.PaymentYipayReturnURL,
+		"payment_openpayment_base_url":             input.PaymentOpenPaymentBaseURL,
+		"payment_openpayment_config_url":           input.PaymentOpenPaymentConfigURL,
+		"payment_openpayment_merchant_id":          input.PaymentOpenPaymentMerchantID,
+		"payment_openpayment_key":                  input.PaymentOpenPaymentKey,
+		"rate_limit_requests_per_minute":           input.RateLimitRequestsPerMinute,
+		"rate_limit_burst":                         input.RateLimitBurst,
+		"sensitive_words":                          input.SensitiveWords,
+		"sensitive_filter_scope":                   input.SensitiveFilterScope,
+		"ssrf_allowed_hosts":                       input.SSRFAllowedHosts,
+		"hcaptcha_site_key":                        input.HCaptchaSiteKey,
+		"hcaptcha_secret":                          input.HCaptchaSecret,
+		"smtp_host":                                input.SMTPHost,
+		"smtp_port":                                input.SMTPPort,
+		"smtp_username":                            input.SMTPUsername,
+		"smtp_password":                            input.SMTPPassword,
+		"smtp_from":                                input.SMTPFrom,
 	}
 	for key, value := range stringSettings {
 		if value == nil {
@@ -435,38 +453,41 @@ func (api *SystemAPI) UpdateSettings(c *gin.Context) {
 	}
 
 	boolSettings := map[string]*bool{
-		"top_nav_enabled":                input.TopNavEnabled,
-		"sidebar_dashboard_enabled":      input.SidebarDashboardEnabled,
-		"sidebar_usage_enabled":          input.SidebarUsageEnabled,
-		"sidebar_wallet_enabled":         input.SidebarWalletEnabled,
-		"sidebar_data_board_enabled":     input.SidebarDataBoardEnabled,
-		"sidebar_api_keys_enabled":       input.SidebarAPIKeysEnabled,
-		"sidebar_chat_enabled":           input.SidebarChatEnabled,
-		"sidebar_images_enabled":         input.SidebarImagesEnabled,
-		"sidebar_settings_enabled":       input.SidebarSettingsEnabled,
-		"sidebar_system_enabled":         input.SidebarSystemEnabled,
-		"sidebar_admin_overview_enabled": input.SidebarAdminOverviewEnabled,
-		"sidebar_channels_enabled":       input.SidebarChannelsEnabled,
-		"sidebar_models_enabled":         input.SidebarModelsEnabled,
-		"sidebar_users_enabled":          input.SidebarUsersEnabled,
-		"message_channel_enabled":        input.MessageChannelEnabled,
-		"referral_enabled":               input.ReferralEnabled,
-		"pricing_endpoint_enabled":       input.PricingEndpointEnabled,
-		"status_monitor_enabled":         input.StatusMonitorEnabled,
-		"checkin_enabled":                input.CheckInEnabled,
-		"checkin_streak_enabled":         input.CheckInStreakEnabled,
-		"checkin_random_enabled":         input.CheckInRandomEnabled,
-		"payment_enabled":                input.PaymentEnabled,
-		"rate_limit_enabled":             input.RateLimitEnabled,
-		"sensitive_filter_enabled":       input.SensitiveFilterEnabled,
-		"ssrf_protection_enabled":        input.SSRFProtectionEnabled,
-		"ssrf_allow_private_networks":    input.SSRFAllowPrivateNetworks,
-		"oidc_enabled":                   input.OIDCEnabled,
-		"passkey_enabled":                input.PasskeyEnabled,
-		"password_login_enabled":         input.PasswordLoginEnabled,
-		"password_registration_enabled":  input.PasswordRegistrationEnabled,
-		"password_hcaptcha_enabled":      input.PasswordHCaptchaEnabled,
-		"email_verification_required":    input.EmailVerificationRequired,
+		"top_nav_enabled":                          input.TopNavEnabled,
+		"sidebar_dashboard_enabled":                input.SidebarDashboardEnabled,
+		"sidebar_usage_enabled":                    input.SidebarUsageEnabled,
+		"sidebar_wallet_enabled":                   input.SidebarWalletEnabled,
+		"sidebar_data_board_enabled":               input.SidebarDataBoardEnabled,
+		"sidebar_api_keys_enabled":                 input.SidebarAPIKeysEnabled,
+		"sidebar_chat_enabled":                     input.SidebarChatEnabled,
+		"sidebar_images_enabled":                   input.SidebarImagesEnabled,
+		"sidebar_settings_enabled":                 input.SidebarSettingsEnabled,
+		"sidebar_system_enabled":                   input.SidebarSystemEnabled,
+		"sidebar_admin_overview_enabled":           input.SidebarAdminOverviewEnabled,
+		"sidebar_channels_enabled":                 input.SidebarChannelsEnabled,
+		"sidebar_models_enabled":                   input.SidebarModelsEnabled,
+		"sidebar_users_enabled":                    input.SidebarUsersEnabled,
+		"message_channel_enabled":                  input.MessageChannelEnabled,
+		"referral_enabled":                         input.ReferralEnabled,
+		"pricing_endpoint_enabled":                 input.PricingEndpointEnabled,
+		"status_monitor_enabled":                   input.StatusMonitorEnabled,
+		"reliability_auto_disable_enabled":         input.ReliabilityAutoDisableEnabled,
+		"reliability_auto_detect_upstream_enabled": input.ReliabilityAutoDetectUpstreamEnabled,
+		"reliability_auto_recover_enabled":         input.ReliabilityAutoRecoverEnabled,
+		"checkin_enabled":                          input.CheckInEnabled,
+		"checkin_streak_enabled":                   input.CheckInStreakEnabled,
+		"checkin_random_enabled":                   input.CheckInRandomEnabled,
+		"payment_enabled":                          input.PaymentEnabled,
+		"rate_limit_enabled":                       input.RateLimitEnabled,
+		"sensitive_filter_enabled":                 input.SensitiveFilterEnabled,
+		"ssrf_protection_enabled":                  input.SSRFProtectionEnabled,
+		"ssrf_allow_private_networks":              input.SSRFAllowPrivateNetworks,
+		"oidc_enabled":                             input.OIDCEnabled,
+		"passkey_enabled":                          input.PasskeyEnabled,
+		"password_login_enabled":                   input.PasswordLoginEnabled,
+		"password_registration_enabled":            input.PasswordRegistrationEnabled,
+		"password_hcaptcha_enabled":                input.PasswordHCaptchaEnabled,
+		"email_verification_required":              input.EmailVerificationRequired,
 	}
 	for key, value := range boolSettings {
 		if value == nil {
@@ -483,99 +504,106 @@ func (api *SystemAPI) UpdateSettings(c *gin.Context) {
 
 func currentPublicSystemSettings() systemSettingsResponse {
 	return systemSettingsResponse{
-		Edition:                       service.CurrentEdition(),
-		SiteName:                      settingString("site_name", "flai"),
-		BaseURL:                       settingString("base_url", ""),
-		IconURL:                       settingString("icon_url", ""),
-		FooterText:                    settingString("footer_text", ""),
-		AboutHTML:                     settingString("about_html", ""),
-		HomeIframeURL:                 settingString("home_iframe_url", ""),
-		PrivacyPolicy:                 settingString("privacy_policy", ""),
-		Terms:                         settingString("terms", ""),
-		PrivacyPolicyURL:              settingString("privacy_policy_url", ""),
-		TermsURL:                      settingString("terms_url", ""),
-		AuthAgreementMode:             currentAuthAgreementMode(),
-		Announcement:                  settingString("announcement", ""),
-		TopNavEnabled:                 settingBool("top_nav_enabled", false),
-		TopNavItems:                   settingString("top_nav_items", ""),
-		PageLayouts:                   settingString("page_layouts", "{}"),
-		ThemeLightBackground:          settingString("theme_light_background", "#ffffff"),
-		ThemeLightForeground:          settingString("theme_light_foreground", "#020817"),
-		ThemeLightCard:                settingString("theme_light_card", "#ffffff"),
-		ThemeLightCardForeground:      settingString("theme_light_card_foreground", "#020817"),
-		ThemeLightPrimary:             settingString("theme_light_primary", "#0f172a"),
-		ThemeLightPrimaryForeground:   settingString("theme_light_primary_foreground", "#f8fafc"),
-		ThemeLightSecondary:           settingString("theme_light_secondary", "#f1f5f9"),
-		ThemeLightSecondaryForeground: settingString("theme_light_secondary_foreground", "#0f172a"),
-		ThemeLightAccent:              settingString("theme_light_accent", "#f1f5f9"),
-		ThemeLightAccentForeground:    settingString("theme_light_accent_foreground", "#0f172a"),
-		ThemeLightMuted:               settingString("theme_light_muted", "#f1f5f9"),
-		ThemeLightMutedForeground:     settingString("theme_light_muted_foreground", "#64748b"),
-		ThemeLightBorder:              settingString("theme_light_border", "#e2e8f0"),
-		ThemeDarkBackground:           settingString("theme_dark_background", "#020817"),
-		ThemeDarkForeground:           settingString("theme_dark_foreground", "#f8fafc"),
-		ThemeDarkCard:                 settingString("theme_dark_card", "#020817"),
-		ThemeDarkCardForeground:       settingString("theme_dark_card_foreground", "#f8fafc"),
-		ThemeDarkPrimary:              settingString("theme_dark_primary", "#f8fafc"),
-		ThemeDarkPrimaryForeground:    settingString("theme_dark_primary_foreground", "#0f172a"),
-		ThemeDarkSecondary:            settingString("theme_dark_secondary", "#1e293b"),
-		ThemeDarkSecondaryForeground:  settingString("theme_dark_secondary_foreground", "#f8fafc"),
-		ThemeDarkAccent:               settingString("theme_dark_accent", "#1e293b"),
-		ThemeDarkAccentForeground:     settingString("theme_dark_accent_foreground", "#f8fafc"),
-		ThemeDarkMuted:                settingString("theme_dark_muted", "#1e293b"),
-		ThemeDarkMutedForeground:      settingString("theme_dark_muted_foreground", "#94a3b8"),
-		ThemeDarkBorder:               settingString("theme_dark_border", "#1e293b"),
-		SidebarDashboardEnabled:       settingBool("sidebar_dashboard_enabled", true),
-		SidebarUsageEnabled:           settingBool("sidebar_usage_enabled", true),
-		SidebarWalletEnabled:          settingBool("sidebar_wallet_enabled", true),
-		SidebarDataBoardEnabled:       settingBool("sidebar_data_board_enabled", true),
-		SidebarAPIKeysEnabled:         settingBool("sidebar_api_keys_enabled", true),
-		SidebarChatEnabled:            settingBool("sidebar_chat_enabled", true),
-		SidebarImagesEnabled:          settingBool("sidebar_images_enabled", true),
-		SidebarSettingsEnabled:        settingBool("sidebar_settings_enabled", true),
-		SidebarSystemEnabled:          settingBool("sidebar_system_enabled", true),
-		SidebarAdminOverviewEnabled:   settingBool("sidebar_admin_overview_enabled", true),
-		SidebarChannelsEnabled:        settingBool("sidebar_channels_enabled", true),
-		SidebarModelsEnabled:          settingBool("sidebar_models_enabled", true),
-		SidebarUsersEnabled:           settingBool("sidebar_users_enabled", true),
-		ChatPageMode:                  currentChatPageMode(),
-		MessageChannelEnabled:         currentMessageChannelEnabled(),
-		ReferralEnabled:               settingBool("referral_enabled", false),
-		ReferralCommissionRate:        settingString("referral_commission_rate", "0"),
-		GroupMultiplierMode:           settingString("group_multiplier_mode", "min"),
-		PricingEndpointEnabled:        settingBool("pricing_endpoint_enabled", false),
-		StatusMonitorEnabled:          settingBool("status_monitor_enabled", false),
-		CheckInEnabled:                settingBool("checkin_enabled", false),
-		CheckInDailyReward:            settingString("checkin_daily_reward", "0"),
-		CheckInTimezone:               settingString("checkin_timezone", "Asia/Shanghai"),
-		CheckInStreakEnabled:          settingBool("checkin_streak_enabled", false),
-		CheckInStreakCycleDays:        settingString("checkin_streak_cycle_days", "7"),
-		CheckInStreakRewards:          settingString("checkin_streak_rewards", "{}"),
-		CheckInRandomEnabled:          settingBool("checkin_random_enabled", false),
-		CheckInRandomMin:              settingString("checkin_random_min", "0"),
-		CheckInRandomMax:              settingString("checkin_random_max", "0"),
-		PaymentEnabled:                settingBool("payment_enabled", false),
-		PaymentCurrencyDisplayName:    settingString("payment_currency_display_name", "$"),
-		PaymentUSDToRMBRate:           settingString("payment_usd_to_rmb_rate", "7.20"),
-		PaymentMinRechargeAmount:      settingString("payment_min_recharge_amount", "1"),
-		PaymentRechargePresets:        settingString("payment_recharge_presets", "[\"5\",\"10\",\"20\",\"50\",\"100\"]"),
-		PaymentMethods:                settingString("payment_methods", "[\"alipay\",\"wxpay\"]"),
-		PaymentGatewayProvider:        normalizePaymentProvider(settingString("payment_gateway_provider", paymentProviderYipay)),
-		RateLimitEnabled:              settingBool("rate_limit_enabled", true),
-		RateLimitRequestsPerMinute:    settingString("rate_limit_requests_per_minute", "60"),
-		RateLimitBurst:                settingString("rate_limit_burst", "10"),
-		SensitiveFilterEnabled:        settingBool("sensitive_filter_enabled", false),
-		SensitiveFilterScope:          settingString("sensitive_filter_scope", "request"),
-		SSRFProtectionEnabled:         settingBool("ssrf_protection_enabled", true),
-		SSRFAllowPrivateNetworks:      settingBool("ssrf_allow_private_networks", false),
-		OIDCEnabled:                   settingBool("oidc_enabled", false),
-		OAuthProviders:                publicOAuthProvidersJSON(),
-		PasskeyEnabled:                settingBool("passkey_enabled", false),
-		PasswordLoginEnabled:          settingBool("password_login_enabled", true),
-		PasswordRegistrationEnabled:   settingBool("password_registration_enabled", true),
-		PasswordHCaptchaEnabled:       settingBool("password_hcaptcha_enabled", false),
-		HCaptchaSiteKey:               settingString("hcaptcha_site_key", ""),
-		EmailVerificationRequired:     settingBool("email_verification_required", false),
+		Edition:                              service.CurrentEdition(),
+		SiteName:                             settingString("site_name", "flai"),
+		BaseURL:                              settingString("base_url", ""),
+		IconURL:                              settingString("icon_url", ""),
+		FooterText:                           settingString("footer_text", ""),
+		AboutHTML:                            settingString("about_html", ""),
+		HomeIframeURL:                        settingString("home_iframe_url", ""),
+		PrivacyPolicy:                        settingString("privacy_policy", ""),
+		Terms:                                settingString("terms", ""),
+		PrivacyPolicyURL:                     settingString("privacy_policy_url", ""),
+		TermsURL:                             settingString("terms_url", ""),
+		AuthAgreementMode:                    currentAuthAgreementMode(),
+		Announcement:                         settingString("announcement", ""),
+		TopNavEnabled:                        settingBool("top_nav_enabled", false),
+		TopNavItems:                          settingString("top_nav_items", ""),
+		PageLayouts:                          settingString("page_layouts", "{}"),
+		ThemeLightBackground:                 settingString("theme_light_background", "#ffffff"),
+		ThemeLightForeground:                 settingString("theme_light_foreground", "#020817"),
+		ThemeLightCard:                       settingString("theme_light_card", "#ffffff"),
+		ThemeLightCardForeground:             settingString("theme_light_card_foreground", "#020817"),
+		ThemeLightPrimary:                    settingString("theme_light_primary", "#0f172a"),
+		ThemeLightPrimaryForeground:          settingString("theme_light_primary_foreground", "#f8fafc"),
+		ThemeLightSecondary:                  settingString("theme_light_secondary", "#f1f5f9"),
+		ThemeLightSecondaryForeground:        settingString("theme_light_secondary_foreground", "#0f172a"),
+		ThemeLightAccent:                     settingString("theme_light_accent", "#f1f5f9"),
+		ThemeLightAccentForeground:           settingString("theme_light_accent_foreground", "#0f172a"),
+		ThemeLightMuted:                      settingString("theme_light_muted", "#f1f5f9"),
+		ThemeLightMutedForeground:            settingString("theme_light_muted_foreground", "#64748b"),
+		ThemeLightBorder:                     settingString("theme_light_border", "#e2e8f0"),
+		ThemeDarkBackground:                  settingString("theme_dark_background", "#020817"),
+		ThemeDarkForeground:                  settingString("theme_dark_foreground", "#f8fafc"),
+		ThemeDarkCard:                        settingString("theme_dark_card", "#020817"),
+		ThemeDarkCardForeground:              settingString("theme_dark_card_foreground", "#f8fafc"),
+		ThemeDarkPrimary:                     settingString("theme_dark_primary", "#f8fafc"),
+		ThemeDarkPrimaryForeground:           settingString("theme_dark_primary_foreground", "#0f172a"),
+		ThemeDarkSecondary:                   settingString("theme_dark_secondary", "#1e293b"),
+		ThemeDarkSecondaryForeground:         settingString("theme_dark_secondary_foreground", "#f8fafc"),
+		ThemeDarkAccent:                      settingString("theme_dark_accent", "#1e293b"),
+		ThemeDarkAccentForeground:            settingString("theme_dark_accent_foreground", "#f8fafc"),
+		ThemeDarkMuted:                       settingString("theme_dark_muted", "#1e293b"),
+		ThemeDarkMutedForeground:             settingString("theme_dark_muted_foreground", "#94a3b8"),
+		ThemeDarkBorder:                      settingString("theme_dark_border", "#1e293b"),
+		SidebarDashboardEnabled:              settingBool("sidebar_dashboard_enabled", true),
+		SidebarUsageEnabled:                  settingBool("sidebar_usage_enabled", true),
+		SidebarWalletEnabled:                 settingBool("sidebar_wallet_enabled", true),
+		SidebarDataBoardEnabled:              settingBool("sidebar_data_board_enabled", true),
+		SidebarAPIKeysEnabled:                settingBool("sidebar_api_keys_enabled", true),
+		SidebarChatEnabled:                   settingBool("sidebar_chat_enabled", true),
+		SidebarImagesEnabled:                 settingBool("sidebar_images_enabled", true),
+		SidebarSettingsEnabled:               settingBool("sidebar_settings_enabled", true),
+		SidebarSystemEnabled:                 settingBool("sidebar_system_enabled", true),
+		SidebarAdminOverviewEnabled:          settingBool("sidebar_admin_overview_enabled", true),
+		SidebarChannelsEnabled:               settingBool("sidebar_channels_enabled", true),
+		SidebarModelsEnabled:                 settingBool("sidebar_models_enabled", true),
+		SidebarUsersEnabled:                  settingBool("sidebar_users_enabled", true),
+		ChatPageMode:                         currentChatPageMode(),
+		MessageChannelEnabled:                currentMessageChannelEnabled(),
+		ReferralEnabled:                      settingBool("referral_enabled", false),
+		ReferralCommissionRate:               settingString("referral_commission_rate", "0"),
+		GroupMultiplierMode:                  settingString("group_multiplier_mode", "min"),
+		PricingEndpointEnabled:               settingBool("pricing_endpoint_enabled", false),
+		StatusMonitorEnabled:                 settingBool("status_monitor_enabled", false),
+		ReliabilityAutoDisableEnabled:        settingBool("reliability_auto_disable_enabled", false),
+		ReliabilityDisableAfterFailures:      settingString("reliability_disable_after_failures", "3"),
+		ReliabilityAutoDetectUpstreamEnabled: settingBool("reliability_auto_detect_upstream_enabled", false),
+		ReliabilityAutoDetectIntervalSeconds: settingString("reliability_auto_detect_interval_seconds", "300"),
+		ReliabilityAutoDetectTimeoutSeconds:  settingString("reliability_auto_detect_timeout_seconds", "10"),
+		ReliabilityAutoRecoverEnabled:        settingBool("reliability_auto_recover_enabled", false),
+		ReliabilityRecoveryAfterSeconds:      settingString("reliability_recovery_after_seconds", "1800"),
+		CheckInEnabled:                       settingBool("checkin_enabled", false),
+		CheckInDailyReward:                   settingString("checkin_daily_reward", "0"),
+		CheckInTimezone:                      settingString("checkin_timezone", "Asia/Shanghai"),
+		CheckInStreakEnabled:                 settingBool("checkin_streak_enabled", false),
+		CheckInStreakCycleDays:               settingString("checkin_streak_cycle_days", "7"),
+		CheckInStreakRewards:                 settingString("checkin_streak_rewards", "{}"),
+		CheckInRandomEnabled:                 settingBool("checkin_random_enabled", false),
+		CheckInRandomMin:                     settingString("checkin_random_min", "0"),
+		CheckInRandomMax:                     settingString("checkin_random_max", "0"),
+		PaymentEnabled:                       settingBool("payment_enabled", false),
+		PaymentCurrencyDisplayName:           settingString("payment_currency_display_name", "$"),
+		PaymentUSDToRMBRate:                  settingString("payment_usd_to_rmb_rate", "7.20"),
+		PaymentMinRechargeAmount:             settingString("payment_min_recharge_amount", "1"),
+		PaymentRechargePresets:               settingString("payment_recharge_presets", "[\"5\",\"10\",\"20\",\"50\",\"100\"]"),
+		PaymentMethods:                       settingString("payment_methods", "[\"alipay\",\"wxpay\"]"),
+		PaymentGatewayProvider:               normalizePaymentProvider(settingString("payment_gateway_provider", paymentProviderYipay)),
+		RateLimitEnabled:                     settingBool("rate_limit_enabled", true),
+		RateLimitRequestsPerMinute:           settingString("rate_limit_requests_per_minute", "60"),
+		RateLimitBurst:                       settingString("rate_limit_burst", "10"),
+		SensitiveFilterEnabled:               settingBool("sensitive_filter_enabled", false),
+		SensitiveFilterScope:                 settingString("sensitive_filter_scope", "request"),
+		SSRFProtectionEnabled:                settingBool("ssrf_protection_enabled", true),
+		SSRFAllowPrivateNetworks:             settingBool("ssrf_allow_private_networks", false),
+		OIDCEnabled:                          settingBool("oidc_enabled", false),
+		OAuthProviders:                       publicOAuthProvidersJSON(),
+		PasskeyEnabled:                       settingBool("passkey_enabled", false),
+		PasswordLoginEnabled:                 settingBool("password_login_enabled", true),
+		PasswordRegistrationEnabled:          settingBool("password_registration_enabled", true),
+		PasswordHCaptchaEnabled:              settingBool("password_hcaptcha_enabled", false),
+		HCaptchaSiteKey:                      settingString("hcaptcha_site_key", ""),
+		EmailVerificationRequired:            settingBool("email_verification_required", false),
 	}
 }
 
@@ -1213,6 +1241,14 @@ func (api *ChannelAPI) Update(c *gin.Context) {
 		return
 	}
 	channelID := channel.ID
+	wasEnabled := channel.Enabled
+	consecutiveFailures := channel.ConsecutiveFailures
+	lastFailureAt := channel.LastFailureAt
+	lastFailureReason := channel.LastFailureReason
+	autoDisabledAt := channel.AutoDisabledAt
+	autoDisabledReason := channel.AutoDisabledReason
+	lastHealthCheckedAt := channel.LastHealthCheckedAt
+	lastHealthStatus := channel.LastHealthStatus
 	if err := c.ShouldBindJSON(&channel); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -1222,6 +1258,21 @@ func (api *ChannelAPI) Update(c *gin.Context) {
 		return
 	}
 	channel.ID = channelID
+	channel.ConsecutiveFailures = consecutiveFailures
+	channel.LastFailureAt = lastFailureAt
+	channel.LastFailureReason = lastFailureReason
+	channel.AutoDisabledAt = autoDisabledAt
+	channel.AutoDisabledReason = autoDisabledReason
+	channel.LastHealthCheckedAt = lastHealthCheckedAt
+	channel.LastHealthStatus = lastHealthStatus
+	if !wasEnabled && channel.Enabled {
+		channel.ConsecutiveFailures = 0
+		channel.LastFailureAt = nil
+		channel.LastFailureReason = ""
+		channel.AutoDisabledAt = nil
+		channel.AutoDisabledReason = ""
+		channel.LastHealthStatus = "pending"
+	}
 	if err := model.DB.Save(&channel).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
