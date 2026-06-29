@@ -882,6 +882,11 @@ func advancedChatAssistantConnectorActionEnabled(action string) bool {
 	switch action {
 	case "list_files":
 		return advancedChatAssistantConnectorListFilesEnabled()
+	case "list_windows_drives":
+		return advancedChatAssistantConnectorListFilesEnabled() ||
+			advancedChatAssistantConnectorReadFileEnabled() ||
+			advancedChatAssistantConnectorWriteFileEnabled() ||
+			advancedChatAssistantConnectorReplaceTextEnabled()
 	case "read_file":
 		return advancedChatAssistantConnectorReadFileEnabled()
 	case "write_file":

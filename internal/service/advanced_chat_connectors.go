@@ -36,13 +36,14 @@ const (
 	advancedChatAgentSkillsMaxFileBytes  = 64 * 1024
 	advancedChatAgentSkillsMaxTotalBytes = 256 * 1024
 
-	advancedChatConnectorToolListFiles   = "workspace_list_files"
-	advancedChatConnectorToolReadFile    = "workspace_read_file"
-	advancedChatConnectorToolWriteFile   = "workspace_write_file"
-	advancedChatConnectorToolReplaceText = "workspace_replace_text"
-	advancedChatConnectorToolRunCommand  = "workspace_run_command"
-	advancedChatConnectorToolWebSearch   = "workspace_web_search"
-	advancedChatConnectorToolWebFetch    = "workspace_web_fetch"
+	advancedChatConnectorToolListFiles     = "workspace_list_files"
+	advancedChatConnectorToolReadFile      = "workspace_read_file"
+	advancedChatConnectorToolWriteFile     = "workspace_write_file"
+	advancedChatConnectorToolReplaceText   = "workspace_replace_text"
+	advancedChatConnectorToolRunCommand    = "workspace_run_command"
+	advancedChatConnectorToolWebSearch     = "workspace_web_search"
+	advancedChatConnectorToolWebFetch      = "workspace_web_fetch"
+	advancedChatConnectorToolWindowsDrives = "workspace_list_windows_drives"
 
 	advancedChatConnectorPreviewOldContent          = "preview_old_content"
 	advancedChatConnectorPreviewOldContentAvailable = "preview_old_content_available"
@@ -804,6 +805,17 @@ func advancedChatConnectorTools(device *AdvancedChatConnectorDevice, workspacePa
 			},
 		},
 	})
+	if unrestricted && strings.EqualFold(device.OS, "windows") {
+		bind(advancedChatConnectorToolWindowsDrives, "list_windows_drives")
+		add("list_windows_drives", ChatExecutorTool{
+			Name:        advancedChatConnectorToolWindowsDrives,
+			Description: "List available Windows drive roots on the connected local device. Use this before choosing an absolute path in unrestricted Windows message channels.",
+			Schema: map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+			},
+		})
+	}
 	bind(advancedChatConnectorToolReadFile, "read_file")
 	readDescription := "Read a UTF-8 or text-like file from the selected local workspace. Paths must be relative to the workspace root."
 	if unrestricted {
@@ -833,7 +845,7 @@ func advancedChatConnectorTools(device *AdvancedChatConnectorDevice, workspacePa
 			"type":     "object",
 			"required": []string{"path", "content"},
 			"properties": map[string]interface{}{
-				"path":        map[string]interface{}{"type": "string", "description": "Relative file path."},
+				"path":        map[string]interface{}{"type": "string", "description": "File path. Relative to workspace root when workspace-limited; absolute paths are allowed when unrestricted."},
 				"content":     map[string]interface{}{"type": "string", "description": "Full file content to write."},
 				"overwrite":   map[string]interface{}{"type": "boolean", "description": "Whether to overwrite an existing file."},
 				"create_dirs": map[string]interface{}{"type": "boolean", "description": "Whether to create parent directories."},
@@ -851,7 +863,7 @@ func advancedChatConnectorTools(device *AdvancedChatConnectorDevice, workspacePa
 		Schema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"path":     map[string]interface{}{"type": "string", "description": "Relative file path for a single replacement, or default path for replacements entries."},
+				"path":     map[string]interface{}{"type": "string", "description": "File path for a single replacement, or default path for replacements entries. Relative to workspace root when workspace-limited; absolute paths are allowed when unrestricted."},
 				"old_text": map[string]interface{}{"type": "string", "description": "Exact text to replace for a single replacement."},
 				"new_text": map[string]interface{}{"type": "string", "description": "Replacement text for a single replacement."},
 				"replacements": map[string]interface{}{
@@ -861,7 +873,7 @@ func advancedChatConnectorTools(device *AdvancedChatConnectorDevice, workspacePa
 						"type":     "object",
 						"required": []string{"old_text", "new_text"},
 						"properties": map[string]interface{}{
-							"path":     map[string]interface{}{"type": "string", "description": "Relative file path. Falls back to the top-level path."},
+							"path":     map[string]interface{}{"type": "string", "description": "File path. Falls back to the top-level path."},
 							"old_text": map[string]interface{}{"type": "string", "description": "Exact text to replace."},
 							"new_text": map[string]interface{}{"type": "string", "description": "Replacement text."},
 						},
@@ -882,7 +894,7 @@ func advancedChatConnectorTools(device *AdvancedChatConnectorDevice, workspacePa
 			"type":     "object",
 			"required": []string{"command"},
 			"properties": map[string]interface{}{
-				"command":     map[string]interface{}{"type": "string", "description": "Command line to execute in the workspace."},
+				"command":     map[string]interface{}{"type": "string", "description": "Command line to execute in the workspace, or on the connected local device when unrestricted."},
 				"timeout_sec": map[string]interface{}{"type": "integer", "description": "Maximum execution time in seconds.", "minimum": 1, "maximum": 120},
 			},
 		},
@@ -972,7 +984,7 @@ func callAdvancedChatConnectorToolExpanded(ctx context.Context, userID uint, run
 }
 
 func loadAdvancedChatWorkspaceSkillsForRun(ctx context.Context, userID uint, device *AdvancedChatConnectorDevice, workspacePath string) ([]advancedChatWorkspaceSkill, error) {
-	if device == nil || strings.TrimSpace(workspacePath) == "" {
+	if device == nil {
 		return []advancedChatWorkspaceSkill{}, nil
 	}
 	binding := advancedChatConnectorToolBinding{
@@ -985,7 +997,7 @@ func loadAdvancedChatWorkspaceSkillsForRun(ctx context.Context, userID uint, dev
 	defer cancel()
 	result, err := callAdvancedChatConnectorTool(loadCtx, userID, "", binding, map[string]interface{}{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to load workspace agent skills: %w", err)
+		return nil, fmt.Errorf("failed to load connector agent skills: %w", err)
 	}
 	return parseAdvancedChatWorkspaceSkills(result)
 }
@@ -1008,10 +1020,10 @@ func parseAdvancedChatWorkspaceSkills(raw string) ([]advancedChatWorkspaceSkill,
 		TotalBytesRead int  `json:"total_bytes_read"`
 	}
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return nil, fmt.Errorf("failed to decode workspace agent skills: %w", err)
+		return nil, fmt.Errorf("failed to decode connector agent skills: %w", err)
 	}
 	if len(payload.Skills) > advancedChatAgentSkillsMaxFiles || payload.TotalBytesRead > advancedChatAgentSkillsMaxTotalBytes {
-		return nil, errors.New("workspace agent skills exceeded server limits")
+		return nil, errors.New("connector agent skills exceeded server limits")
 	}
 	result := make([]advancedChatWorkspaceSkill, 0, len(payload.Skills))
 	totalBytes := 0
@@ -1183,7 +1195,7 @@ func expandAdvancedChatConnectorToolArguments(binding advancedChatConnectorToolB
 
 func advancedChatConnectorTaskRequiresApproval(binding advancedChatConnectorToolBinding, arguments map[string]interface{}) bool {
 	switch binding.Action {
-	case "list_files", "read_file", "web_search", "web_fetch", "list_agent_skills":
+	case "list_files", "read_file", "web_search", "web_fetch", "list_agent_skills", "list_windows_drives":
 		return false
 	case "run_command":
 		command, _ := arguments["command"].(string)
@@ -1249,19 +1261,33 @@ func advancedChatConnectorSystemPrompt(device *AdvancedChatConnectorDevice, work
 		return ""
 	}
 	workspacePath = strings.TrimSpace(workspacePath)
+	osName := strings.TrimSpace(device.OS)
+	if osName == "" {
+		osName = "unknown"
+	}
+	archName := strings.TrimSpace(device.Arch)
+	if archName == "" {
+		archName = "unknown"
+	}
 	if workspacePath == "" {
+		windowsPathHint := ""
+		if strings.EqualFold(device.OS, "windows") {
+			windowsPathHint = "\nThe connected device is Windows. Use workspace_list_windows_drives to discover available drive roots before selecting absolute paths when the drive is not already known."
+		}
 		return fmt.Sprintf(`A local device connector is available without a workspace limit.
 Device: %s
+Environment: OS=%s Arch=%s
 Use workspace tools when you need to inspect or edit files on this device.
-Absolute paths are allowed. Ask for or infer concrete paths before reading or changing files.
-Read-only workspace tools, web search, and web fetch do not require approval. The user will be asked in the message channel to reply yes before file operations that change files are sent to the local connector, unless the message channel enables automatic approval. Commands always require approval unless the command starts with a prefix explicitly allowed in the message channel settings.`, device.Name)
+Absolute paths are allowed. Ask for or infer concrete paths before reading or changing files.%s
+Read-only workspace tools, web search, web fetch, and Windows drive listing do not require approval. The user will be asked in the message channel to reply yes before file operations that change files are sent to the local connector, unless the message channel enables automatic approval. Commands always require approval unless the command starts with a prefix explicitly allowed in the message channel settings.`, device.Name, osName, archName, windowsPathHint)
 	}
 	return fmt.Sprintf(`A local workspace connector is available.
 Device: %s
+Environment: OS=%s Arch=%s
 Workspace: %s
 Use workspace tools when you need to inspect or edit files in this workspace.
 Use only relative paths in workspace tool arguments.
-Read-only workspace tools, web search, and web fetch do not require approval. The web frontend will ask the user for approval before file operations that change files are sent to the local connector, unless the session enables automatic approval. Commands always require approval unless the command starts with a prefix explicitly allowed in the session settings.`, device.Name, workspacePath)
+Read-only workspace tools, web search, and web fetch do not require approval. The web frontend will ask the user for approval before file operations that change files are sent to the local connector, unless the session enables automatic approval. Commands always require approval unless the command starts with a prefix explicitly allowed in the session settings.`, device.Name, osName, archName, workspacePath)
 }
 
 func normalizeConnectorCommandPrefixes(values []string) []string {

@@ -613,7 +613,7 @@ func buildAdvancedChatCompletionSystemPrompt(agent *AdvancedChatAgent, skills []
 	}
 	for _, skill := range workspaceSkills {
 		if strings.TrimSpace(skill.Content) != "" {
-			header := "[Workspace Skill: " + skill.Name + "]"
+			header := "[Connector Skill: " + skill.Name + "]"
 			if strings.TrimSpace(skill.Path) != "" {
 				header += "\nPath: " + skill.Path
 			}
@@ -624,9 +624,9 @@ func buildAdvancedChatCompletionSystemPrompt(agent *AdvancedChatAgent, skills []
 		}
 	}
 	if len(workspaceSkills) > 0 {
-		sections = append(sections, strings.TrimSpace(`Workspace skills were loaded from the selected workspace .agents directory.
-Follow these workspace skills when they are relevant to the user's task.
-If a workspace skill defines scripts, commands, checks, or other executable steps, run them through the available workspace connector command tool rather than claiming they were run.`))
+		sections = append(sections, strings.TrimSpace(`Connector skills were loaded from the selected workspace .agents directory and the user-level token-market/.agents directory when available.
+Follow these connector skills when they are relevant to the user's task.
+If a connector skill defines scripts, commands, checks, or other executable steps, run them through the available workspace connector command tool rather than claiming they were run.`))
 	}
 	if mode == advancedChatModeAssistant {
 		sections = append(sections, assistantModeSystemPrompt())

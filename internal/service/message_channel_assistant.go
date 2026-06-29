@@ -63,7 +63,7 @@ func ExecuteMessageChannelAssistantCompletion(user *model.User, req MessageChann
 		return nil, err
 	}
 	workspaceSkills := []advancedChatWorkspaceSkill{}
-	if device != nil && strings.TrimSpace(workspacePath) != "" {
+	if device != nil {
 		workspaceSkills, err = loadAdvancedChatWorkspaceSkillsForRun(ctx, user.ID, device, workspacePath)
 		if err != nil {
 			return nil, err

@@ -494,7 +494,7 @@ func prepareAdvancedChatAssistantRun(ctx context.Context, userID uint, input adv
 		return preparedAdvancedChatAssistantRun{}, http.StatusBadRequest, err.Error(), err
 	}
 	workspaceSkills := []advancedChatWorkspaceSkill{}
-	if connectorDevice != nil && strings.TrimSpace(connectorWorkspace) != "" {
+	if connectorDevice != nil {
 		workspaceSkills, err = loadAdvancedChatWorkspaceSkillsForRun(ctx, userID, connectorDevice, connectorWorkspace)
 		if err != nil {
 			return preparedAdvancedChatAssistantRun{}, http.StatusBadRequest, err.Error(), err
