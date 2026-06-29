@@ -879,6 +879,8 @@ func advancedChatAssistantConnectorActionEnabled(action string) bool {
 		return advancedChatAssistantConnectorRunCommandEnabled()
 	case "web_search":
 		return advancedChatAssistantConnectorWebSearchEnabled()
+	case "web_fetch":
+		return advancedChatAssistantConnectorWebSearchEnabled()
 	default:
 		return false
 	}
