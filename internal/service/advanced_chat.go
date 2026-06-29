@@ -1,0 +1,1020 @@
+package service
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/WindyPear-Team/flai/internal/model"
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+)
+
+type AdvancedChatAgent struct {
+	ID           uint       `gorm:"primaryKey" json:"id"`
+	UserID       uint       `gorm:"uniqueIndex:idx_advanced_chat_agent_user_name;not null" json:"user_id"`
+	User         model.User `gorm:"foreignKey:UserID" json:"-"`
+	Name         string     `gorm:"uniqueIndex:idx_advanced_chat_agent_user_name;size:100;not null" json:"name"`
+	Prompt       string     `gorm:"type:text;not null" json:"prompt"`
+	DefaultModel string     `gorm:"size:100;not null" json:"default_model"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+type AdvancedChatUserSettings struct {
+	ID               uint       `gorm:"primaryKey" json:"id"`
+	UserID           uint       `gorm:"uniqueIndex;not null" json:"user_id"`
+	User             model.User `gorm:"foreignKey:UserID" json:"-"`
+	CustomMCPServers string     `gorm:"type:text;not null" json:"custom_mcp_servers"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+}
+
+type AdvancedChatSkill struct {
+	ID           uint       `gorm:"primaryKey" json:"id"`
+	UserID       uint       `gorm:"uniqueIndex:idx_advanced_chat_skill_user_name;not null" json:"user_id"`
+	User         model.User `gorm:"foreignKey:UserID" json:"-"`
+	Name         string     `gorm:"uniqueIndex:idx_advanced_chat_skill_user_name;size:100;not null" json:"name"`
+	Description  string     `gorm:"type:text;not null" json:"description"`
+	Prompt       string     `gorm:"type:text;not null" json:"prompt"`
+	MCPServerIDs string     `gorm:"type:text;not null" json:"-"`
+	MCPServers   []string   `gorm:"-" json:"mcp_server_ids"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+type AdvancedChatMCPServer struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	URL         string `json:"url,omitempty"`
+	Headers     string `json:"headers,omitempty"`
+	Enabled     bool   `json:"enabled"`
+	RequestMode string `json:"request_mode"`
+}
+
+type advancedChatAPI struct{}
+
+type advancedChatAgentInput struct {
+	Name         string `json:"name"`
+	Prompt       string `json:"prompt"`
+	DefaultModel string `json:"default_model"`
+}
+
+type advancedChatAdminSettingsResponse struct {
+	AttachmentMaxMB                      int                     `json:"attachment_max_mb"`
+	AttachmentAllowedTypes               []string                `json:"attachment_allowed_types"`
+	FileStorageEnabled                   bool                    `json:"file_storage_enabled"`
+	FileStorageTotalMB                   int                     `json:"file_storage_total_mb"`
+	FileStorageAutoSaveImagesEnabled     bool                    `json:"file_storage_auto_save_images_enabled"`
+	FileStorageAutoSaveVideosEnabled     bool                    `json:"file_storage_auto_save_videos_enabled"`
+	BuiltinMCPServers                    []AdvancedChatMCPServer `json:"builtin_mcp_servers"`
+	AssistantModeEnabled                 bool                    `json:"assistant_mode_enabled"`
+	AssistantMCPToolsEnabled             bool                    `json:"assistant_mcp_tools_enabled"`
+	AssistantConnectorListFilesEnabled   bool                    `json:"assistant_connector_list_files_enabled"`
+	AssistantConnectorReadFileEnabled    bool                    `json:"assistant_connector_read_file_enabled"`
+	AssistantConnectorWriteFileEnabled   bool                    `json:"assistant_connector_write_file_enabled"`
+	AssistantConnectorReplaceTextEnabled bool                    `json:"assistant_connector_replace_text_enabled"`
+	AssistantConnectorRunCommandEnabled  bool                    `json:"assistant_connector_run_command_enabled"`
+	AssistantConnectorWebSearchEnabled   bool                    `json:"assistant_connector_web_search_enabled"`
+	ScheduledTasksEnabled                bool                    `json:"scheduled_tasks_enabled"`
+	MessageDeliveryEnabled               bool                    `json:"message_delivery_enabled"`
+	DeliverySystemSMTPEnabled            bool                    `json:"delivery_system_smtp_enabled"`
+}
+
+type advancedChatUserSettingsResponse struct {
+	AttachmentMaxMB                      int                     `json:"attachment_max_mb"`
+	AttachmentAllowedTypes               []string                `json:"attachment_allowed_types"`
+	FileStorageEnabled                   bool                    `json:"file_storage_enabled"`
+	FileStorageTotalMB                   int                     `json:"file_storage_total_mb"`
+	FileStorageUsedBytes                 int64                   `json:"file_storage_used_bytes"`
+	FileStorageAutoSaveImagesEnabled     bool                    `json:"file_storage_auto_save_images_enabled"`
+	FileStorageAutoSaveVideosEnabled     bool                    `json:"file_storage_auto_save_videos_enabled"`
+	MCPServers                           []AdvancedChatMCPServer `json:"mcp_servers"`
+	BuiltinMCPServers                    []AdvancedChatMCPServer `json:"builtin_mcp_servers"`
+	CustomMCPServers                     []AdvancedChatMCPServer `json:"custom_mcp_servers"`
+	AssistantModeEnabled                 bool                    `json:"assistant_mode_enabled"`
+	AssistantMCPToolsEnabled             bool                    `json:"assistant_mcp_tools_enabled"`
+	AssistantConnectorListFilesEnabled   bool                    `json:"assistant_connector_list_files_enabled"`
+	AssistantConnectorReadFileEnabled    bool                    `json:"assistant_connector_read_file_enabled"`
+	AssistantConnectorWriteFileEnabled   bool                    `json:"assistant_connector_write_file_enabled"`
+	AssistantConnectorReplaceTextEnabled bool                    `json:"assistant_connector_replace_text_enabled"`
+	AssistantConnectorRunCommandEnabled  bool                    `json:"assistant_connector_run_command_enabled"`
+	AssistantConnectorWebSearchEnabled   bool                    `json:"assistant_connector_web_search_enabled"`
+	ScheduledTasksEnabled                bool                    `json:"scheduled_tasks_enabled"`
+	MessageDeliveryEnabled               bool                    `json:"message_delivery_enabled"`
+	DeliverySystemSMTPEnabled            bool                    `json:"delivery_system_smtp_enabled"`
+}
+
+type advancedChatAdminSettingsInput struct {
+	AttachmentMaxMB                      *int                    `json:"attachment_max_mb"`
+	AttachmentAllowedTypes               []string                `json:"attachment_allowed_types"`
+	FileStorageEnabled                   *bool                   `json:"file_storage_enabled"`
+	FileStorageTotalMB                   *int                    `json:"file_storage_total_mb"`
+	FileStorageAutoSaveImagesEnabled     *bool                   `json:"file_storage_auto_save_images_enabled"`
+	FileStorageAutoSaveVideosEnabled     *bool                   `json:"file_storage_auto_save_videos_enabled"`
+	BuiltinMCPServers                    []AdvancedChatMCPServer `json:"builtin_mcp_servers"`
+	AssistantModeEnabled                 *bool                   `json:"assistant_mode_enabled"`
+	AssistantMCPToolsEnabled             *bool                   `json:"assistant_mcp_tools_enabled"`
+	AssistantConnectorListFilesEnabled   *bool                   `json:"assistant_connector_list_files_enabled"`
+	AssistantConnectorReadFileEnabled    *bool                   `json:"assistant_connector_read_file_enabled"`
+	AssistantConnectorWriteFileEnabled   *bool                   `json:"assistant_connector_write_file_enabled"`
+	AssistantConnectorReplaceTextEnabled *bool                   `json:"assistant_connector_replace_text_enabled"`
+	AssistantConnectorRunCommandEnabled  *bool                   `json:"assistant_connector_run_command_enabled"`
+	AssistantConnectorWebSearchEnabled   *bool                   `json:"assistant_connector_web_search_enabled"`
+	ScheduledTasksEnabled                *bool                   `json:"scheduled_tasks_enabled"`
+	MessageDeliveryEnabled               *bool                   `json:"message_delivery_enabled"`
+	DeliverySystemSMTPEnabled            *bool                   `json:"delivery_system_smtp_enabled"`
+}
+
+type advancedChatUserMCPInput struct {
+	CustomMCPServers []AdvancedChatMCPServer `json:"custom_mcp_servers"`
+}
+
+type advancedChatSkillInput struct {
+	Name         string   `json:"name"`
+	Description  string   `json:"description"`
+	Prompt       string   `json:"prompt"`
+	MCPServerIDs []string `json:"mcp_server_ids"`
+}
+
+const (
+	advancedChatAttachmentMaxMBKey                      = "advanced_chat_attachment_max_mb"
+	advancedChatAttachmentAllowedTypesKey               = "advanced_chat_attachment_allowed_types"
+	advancedChatFileStorageEnabledKey                   = "advanced_chat_file_storage_enabled"
+	advancedChatFileStorageTotalMBKey                   = "advanced_chat_file_storage_total_mb"
+	advancedChatFileStorageAutoSaveImagesEnabledKey     = "advanced_chat_file_storage_auto_save_images_enabled"
+	advancedChatFileStorageAutoSaveVideosEnabledKey     = "advanced_chat_file_storage_auto_save_videos_enabled"
+	advancedChatBuiltinMCPServersKey                    = "advanced_chat_builtin_mcp_servers"
+	advancedChatAssistantModeEnabledKey                 = "advanced_chat_assistant_mode_enabled"
+	advancedChatAssistantMCPToolsEnabledKey             = "advanced_chat_assistant_mcp_tools_enabled"
+	advancedChatAssistantConnectorListFilesEnabledKey   = "advanced_chat_assistant_connector_list_files_enabled"
+	advancedChatAssistantConnectorReadFileEnabledKey    = "advanced_chat_assistant_connector_read_file_enabled"
+	advancedChatAssistantConnectorWriteFileEnabledKey   = "advanced_chat_assistant_connector_write_file_enabled"
+	advancedChatAssistantConnectorReplaceTextEnabledKey = "advanced_chat_assistant_connector_replace_text_enabled"
+	advancedChatAssistantConnectorRunCommandEnabledKey  = "advanced_chat_assistant_connector_run_command_enabled"
+	advancedChatAssistantConnectorWebSearchEnabledKey   = "advanced_chat_assistant_connector_web_search_enabled"
+	advancedChatScheduledTasksEnabledKey                = "advanced_chat_scheduled_tasks_enabled"
+	advancedChatMessageDeliveryEnabledKey               = "advanced_chat_message_delivery_enabled"
+	advancedChatDeliverySystemSMTPEnabledKey            = "advanced_chat_delivery_system_smtp_enabled"
+	advancedChatDefaultAttachmentMaxMB                  = 10
+	advancedChatDefaultFileStorageTotalMB               = 100
+	advancedChatDefaultAttachmentTypes                  = "text/plain,text/markdown,application/json,text/csv,image/png,image/jpeg,application/pdf"
+	advancedChatMCPModeBackend                          = "backend"
+	advancedChatMCPModeFrontend                         = "frontend"
+)
+
+func initAdvancedChatFeatures() error {
+	err := model.DB.AutoMigrate(
+		&AdvancedChatAgent{},
+		&AdvancedChatUserSettings{},
+		&AdvancedChatSkill{},
+		&AdvancedChatSession{},
+		&AdvancedChatMessage{},
+		&AdvancedChatRun{},
+		&AdvancedChatRunEvent{},
+		&AdvancedChatFile{},
+		&AdvancedChatConnectorDevice{},
+		&AdvancedChatConnectorTask{},
+		&AdvancedChatDelivery{},
+		&AdvancedChatScheduledTask{},
+	)
+	if err == nil {
+		startAdvancedChatScheduledTaskScheduler()
+	}
+	return err
+}
+
+func registerAdvancedChatAdminRoutes(group *gin.RouterGroup) {
+	api := &advancedChatAPI{}
+	group.GET("/advanced-chat/settings", api.getAdminSettings)
+	group.PUT("/advanced-chat/settings", api.updateAdminSettings)
+}
+
+func registerAdvancedChatUserRoutes(group *gin.RouterGroup) {
+	api := &advancedChatAPI{}
+	group.GET("/advanced-chat/settings", api.getUserSettings)
+	group.POST("/advanced-chat/completions", api.completeChat)
+	group.GET("/advanced-chat/sessions", api.listSessions)
+	group.POST("/advanced-chat/sessions", api.saveSession)
+	group.GET("/advanced-chat/sessions/:id", api.getSession)
+	group.PUT("/advanced-chat/sessions/:id", api.saveSession)
+	group.DELETE("/advanced-chat/sessions/:id", api.deleteSession)
+	group.GET("/advanced-chat/runs/:id", api.getRun)
+	group.GET("/advanced-chat/runs/:id/events", api.listRunEvents)
+	group.POST("/advanced-chat/runs/:id/stop", api.stopRun)
+	group.GET("/advanced-chat/files", api.listFiles)
+	group.POST("/advanced-chat/files", api.uploadFile)
+	group.GET("/advanced-chat/files/:id/content", api.getFileContent)
+	group.GET("/advanced-chat/files/:id/download", api.downloadFile)
+	group.DELETE("/advanced-chat/files/:id", api.deleteFile)
+	group.GET("/advanced-chat/runs/:id/connector-tasks/pending", api.listPendingConnectorTasks)
+	group.POST("/advanced-chat/connector-tasks/:id/decision", api.decideConnectorTask)
+	group.GET("/advanced-chat/devices", api.listConnectorDevices)
+	group.POST("/advanced-chat/devices/token", api.createConnectorToken)
+	group.POST("/advanced-chat/devices/:id/token", api.rotateConnectorDeviceToken)
+	group.PUT("/advanced-chat/devices/:id", api.updateConnectorDevice)
+	group.DELETE("/advanced-chat/devices/:id", api.deleteConnectorDevice)
+	group.POST("/advanced-chat/workspace-skills/refresh", api.refreshWorkspaceSkills)
+	group.PUT("/advanced-chat/mcp-servers", api.updateUserMCPServers)
+	group.GET("/advanced-chat/agents", api.listAgents)
+	group.POST("/advanced-chat/agents", api.createAgent)
+	group.PUT("/advanced-chat/agents/:id", api.updateAgent)
+	group.DELETE("/advanced-chat/agents/:id", api.deleteAgent)
+	group.GET("/advanced-chat/skills", api.listSkills)
+	group.POST("/advanced-chat/skills", api.createSkill)
+	group.PUT("/advanced-chat/skills/:id", api.updateSkill)
+	group.DELETE("/advanced-chat/skills/:id", api.deleteSkill)
+	group.GET("/advanced-chat/deliveries", api.listDeliveries)
+	group.POST("/advanced-chat/deliveries", api.createDelivery)
+	group.PUT("/advanced-chat/deliveries/:id", api.updateDelivery)
+	group.DELETE("/advanced-chat/deliveries/:id", api.deleteDelivery)
+	group.GET("/advanced-chat/scheduled-tasks", api.listScheduledTasks)
+	group.POST("/advanced-chat/scheduled-tasks", api.createScheduledTask)
+	group.PUT("/advanced-chat/scheduled-tasks/:id", api.updateScheduledTask)
+	group.DELETE("/advanced-chat/scheduled-tasks/:id", api.deleteScheduledTask)
+	group.POST("/advanced-chat/scheduled-tasks/:id/run", api.runScheduledTask)
+}
+
+func (api *advancedChatAPI) getAdminSettings(c *gin.Context) {
+	c.JSON(http.StatusOK, currentAdvancedChatAdminSettings())
+}
+
+func (api *advancedChatAPI) updateAdminSettings(c *gin.Context) {
+	var input advancedChatAdminSettingsInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if input.AttachmentMaxMB != nil {
+		if *input.AttachmentMaxMB < 1 || *input.AttachmentMaxMB > 100 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Attachment size must be between 1 and 100 MB"})
+			return
+		}
+		if err := model.SetSystemSetting(advancedChatAttachmentMaxMBKey, strconv.Itoa(*input.AttachmentMaxMB)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update advanced chat settings"})
+			return
+		}
+	}
+
+	if input.AttachmentAllowedTypes != nil {
+		types := normalizeAttachmentTypes(input.AttachmentAllowedTypes)
+		if len(types) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "At least one attachment type is required"})
+			return
+		}
+		if err := model.SetSystemSetting(advancedChatAttachmentAllowedTypesKey, strings.Join(types, ",")); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update advanced chat settings"})
+			return
+		}
+	}
+
+	if input.FileStorageTotalMB != nil {
+		if *input.FileStorageTotalMB < 1 || *input.FileStorageTotalMB > 102400 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "File storage quota must be between 1 and 102400 MB"})
+			return
+		}
+		if err := model.SetSystemSetting(advancedChatFileStorageTotalMBKey, strconv.Itoa(*input.FileStorageTotalMB)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update advanced chat settings"})
+			return
+		}
+	}
+
+	if !advancedChatPremiumFeaturesAvailable() && advancedChatPremiumSettingRequested(input) {
+		writeCommunityAdvancedChatPremiumRequired(c)
+		return
+	}
+
+	if input.BuiltinMCPServers != nil {
+		servers, ok := normalizeMCPServers(c, input.BuiltinMCPServers, advancedChatMCPModeBackend, true)
+		if !ok {
+			return
+		}
+		data, err := json.Marshal(servers)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to encode MCP servers"})
+			return
+		}
+		if err := model.SetSystemSetting(advancedChatBuiltinMCPServersKey, string(data)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update advanced chat settings"})
+			return
+		}
+	}
+
+	boolSettings := map[string]*bool{
+		advancedChatFileStorageEnabledKey:                   input.FileStorageEnabled,
+		advancedChatFileStorageAutoSaveImagesEnabledKey:     input.FileStorageAutoSaveImagesEnabled,
+		advancedChatFileStorageAutoSaveVideosEnabledKey:     input.FileStorageAutoSaveVideosEnabled,
+		advancedChatAssistantModeEnabledKey:                 input.AssistantModeEnabled,
+		advancedChatAssistantMCPToolsEnabledKey:             input.AssistantMCPToolsEnabled,
+		advancedChatAssistantConnectorListFilesEnabledKey:   input.AssistantConnectorListFilesEnabled,
+		advancedChatAssistantConnectorReadFileEnabledKey:    input.AssistantConnectorReadFileEnabled,
+		advancedChatAssistantConnectorWriteFileEnabledKey:   input.AssistantConnectorWriteFileEnabled,
+		advancedChatAssistantConnectorReplaceTextEnabledKey: input.AssistantConnectorReplaceTextEnabled,
+		advancedChatAssistantConnectorRunCommandEnabledKey:  input.AssistantConnectorRunCommandEnabled,
+		advancedChatAssistantConnectorWebSearchEnabledKey:   input.AssistantConnectorWebSearchEnabled,
+		advancedChatScheduledTasksEnabledKey:                input.ScheduledTasksEnabled,
+		advancedChatMessageDeliveryEnabledKey:               input.MessageDeliveryEnabled,
+		advancedChatDeliverySystemSMTPEnabledKey:            input.DeliverySystemSMTPEnabled,
+	}
+	for key, value := range boolSettings {
+		if value == nil {
+			continue
+		}
+		if err := model.SetSystemSetting(key, strconv.FormatBool(*value)); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update advanced chat settings"})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, currentAdvancedChatAdminSettings())
+}
+
+func (api *advancedChatAPI) getUserSettings(c *gin.Context) {
+	user, ok := currentAdvancedChatUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	c.JSON(http.StatusOK, currentAdvancedChatUserSettings(user.ID))
+}
+
+func (api *advancedChatAPI) updateUserMCPServers(c *gin.Context) {
+	user, ok := currentAdvancedChatUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	var input advancedChatUserMCPInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	servers, ok := normalizeMCPServers(c, input.CustomMCPServers, advancedChatMCPModeBackend, true)
+	if !ok {
+		return
+	}
+	data, err := json.Marshal(servers)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to encode MCP servers"})
+		return
+	}
+	settings := AdvancedChatUserSettings{
+		UserID:           user.ID,
+		CustomMCPServers: string(data),
+	}
+	if err := model.DB.Where("user_id = ?", user.ID).Assign(settings).FirstOrCreate(&settings).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save MCP servers"})
+		return
+	}
+	c.JSON(http.StatusOK, currentAdvancedChatUserSettings(user.ID))
+}
+
+func (api *advancedChatAPI) listAgents(c *gin.Context) {
+	user, ok := currentAdvancedChatUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	var agents []AdvancedChatAgent
+	if err := model.DB.Where("user_id = ?", user.ID).Order("created_at ASC").Find(&agents).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list agents"})
+		return
+	}
+	c.JSON(http.StatusOK, agents)
+}
+
+func (api *advancedChatAPI) createAgent(c *gin.Context) {
+	user, ok := currentAdvancedChatUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	var input advancedChatAgentInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	agent, ok := advancedChatAgentFromInput(c, user.ID, input)
+	if !ok {
+		return
+	}
+	if err := model.DB.Create(&agent).Error; err != nil {
+		if isAdvancedChatUniqueConstraintError(err) {
+			c.JSON(http.StatusConflict, gin.H{"error": "Agent name already exists"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create agent"})
+		return
+	}
+	c.JSON(http.StatusOK, agent)
+}
+
+func (api *advancedChatAPI) updateAgent(c *gin.Context) {
+	user, ok := currentAdvancedChatUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	var agent AdvancedChatAgent
+	if err := model.DB.Where("id = ? AND user_id = ?", c.Param("id"), user.ID).First(&agent).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Agent not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load agent"})
+		return
+	}
+
+	var input advancedChatAgentInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	next, ok := advancedChatAgentFromInput(c, user.ID, input)
+	if !ok {
+		return
+	}
+	if err := model.DB.Model(&agent).Updates(map[string]interface{}{
+		"name":          next.Name,
+		"prompt":        next.Prompt,
+		"default_model": next.DefaultModel,
+	}).Error; err != nil {
+		if isAdvancedChatUniqueConstraintError(err) {
+			c.JSON(http.StatusConflict, gin.H{"error": "Agent name already exists"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update agent"})
+		return
+	}
+	model.DB.First(&agent, agent.ID)
+	c.JSON(http.StatusOK, agent)
+}
+
+func (api *advancedChatAPI) deleteAgent(c *gin.Context) {
+	user, ok := currentAdvancedChatUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	if err := model.DB.Where("id = ? AND user_id = ?", c.Param("id"), user.ID).Delete(&AdvancedChatAgent{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete agent"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Agent deleted"})
+}
+
+func (api *advancedChatAPI) listSkills(c *gin.Context) {
+	user, ok := currentAdvancedChatUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	var skills []AdvancedChatSkill
+	if err := model.DB.Where("user_id = ?", user.ID).Order("created_at ASC").Find(&skills).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list skills"})
+		return
+	}
+	for i := range skills {
+		skills[i].MCPServers = decodeMCPServerIDs(skills[i].MCPServerIDs)
+	}
+	c.JSON(http.StatusOK, skills)
+}
+
+func (api *advancedChatAPI) createSkill(c *gin.Context) {
+	user, ok := currentAdvancedChatUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	var input advancedChatSkillInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	skill, ok := advancedChatSkillFromInput(c, user.ID, input)
+	if !ok {
+		return
+	}
+	if err := model.DB.Create(&skill).Error; err != nil {
+		if isAdvancedChatUniqueConstraintError(err) {
+			c.JSON(http.StatusConflict, gin.H{"error": "Skill name already exists"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create skill"})
+		return
+	}
+	skill.MCPServers = decodeMCPServerIDs(skill.MCPServerIDs)
+	c.JSON(http.StatusOK, skill)
+}
+
+func (api *advancedChatAPI) updateSkill(c *gin.Context) {
+	user, ok := currentAdvancedChatUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	var skill AdvancedChatSkill
+	if err := model.DB.Where("id = ? AND user_id = ?", c.Param("id"), user.ID).First(&skill).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Skill not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load skill"})
+		return
+	}
+
+	var input advancedChatSkillInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	next, ok := advancedChatSkillFromInput(c, user.ID, input)
+	if !ok {
+		return
+	}
+	if err := model.DB.Model(&skill).Updates(map[string]interface{}{
+		"name":           next.Name,
+		"description":    next.Description,
+		"prompt":         next.Prompt,
+		"mcp_server_ids": next.MCPServerIDs,
+	}).Error; err != nil {
+		if isAdvancedChatUniqueConstraintError(err) {
+			c.JSON(http.StatusConflict, gin.H{"error": "Skill name already exists"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update skill"})
+		return
+	}
+	model.DB.First(&skill, skill.ID)
+	skill.MCPServers = decodeMCPServerIDs(skill.MCPServerIDs)
+	c.JSON(http.StatusOK, skill)
+}
+
+func (api *advancedChatAPI) deleteSkill(c *gin.Context) {
+	user, ok := currentAdvancedChatUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	if err := model.DB.Where("id = ? AND user_id = ?", c.Param("id"), user.ID).Delete(&AdvancedChatSkill{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete skill"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Skill deleted"})
+}
+
+func advancedChatSkillFromInput(c *gin.Context, userID uint, input advancedChatSkillInput) (AdvancedChatSkill, bool) {
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Skill name is required"})
+		return AdvancedChatSkill{}, false
+	}
+	if len([]rune(name)) > 100 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Skill name is too long"})
+		return AdvancedChatSkill{}, false
+	}
+	description := strings.TrimSpace(input.Description)
+	if len([]rune(description)) > 2000 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Skill description is too long"})
+		return AdvancedChatSkill{}, false
+	}
+	prompt := strings.TrimSpace(input.Prompt)
+	if len([]rune(prompt)) > 20000 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Skill prompt is too long"})
+		return AdvancedChatSkill{}, false
+	}
+	serverIDs, ok := normalizeSkillMCPServerIDs(c, userID, input.MCPServerIDs)
+	if !ok {
+		return AdvancedChatSkill{}, false
+	}
+	encoded, err := json.Marshal(serverIDs)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to encode MCP servers"})
+		return AdvancedChatSkill{}, false
+	}
+	return AdvancedChatSkill{
+		UserID:       userID,
+		Name:         name,
+		Description:  description,
+		Prompt:       prompt,
+		MCPServerIDs: string(encoded),
+	}, true
+}
+
+// normalizeSkillMCPServerIDs validates referenced MCP server ids against the
+// set of servers available to the user (admin builtin + user custom) and
+// returns a deduplicated, order-preserving list.
+func normalizeSkillMCPServerIDs(c *gin.Context, userID uint, ids []string) ([]string, bool) {
+	if len(ids) > 20 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Too many MCP servers"})
+		return nil, false
+	}
+	available := map[string]struct{}{}
+	for _, server := range advancedChatBuiltinMCPServers(false) {
+		available[server.ID] = struct{}{}
+	}
+	for _, server := range advancedChatCustomMCPServers(userID) {
+		available[server.ID] = struct{}{}
+	}
+	result := make([]string, 0, len(ids))
+	seen := map[string]struct{}{}
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		if _, exists := available[id]; !exists {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Unknown MCP server: " + id})
+			return nil, false
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result, true
+}
+
+func decodeMCPServerIDs(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return []string{}
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+		return []string{}
+	}
+	if ids == nil {
+		return []string{}
+	}
+	return ids
+}
+
+func advancedChatAgentFromInput(c *gin.Context, userID uint, input advancedChatAgentInput) (AdvancedChatAgent, bool) {
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Agent name is required"})
+		return AdvancedChatAgent{}, false
+	}
+	if len([]rune(name)) > 100 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Agent name is too long"})
+		return AdvancedChatAgent{}, false
+	}
+	defaultModel := strings.TrimSpace(input.DefaultModel)
+	if len([]rune(defaultModel)) > 100 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Default model is too long"})
+		return AdvancedChatAgent{}, false
+	}
+	prompt := strings.TrimSpace(input.Prompt)
+	if len([]rune(prompt)) > 20000 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Agent prompt is too long"})
+		return AdvancedChatAgent{}, false
+	}
+	return AdvancedChatAgent{
+		UserID:       userID,
+		Name:         name,
+		Prompt:       prompt,
+		DefaultModel: defaultModel,
+	}, true
+}
+
+func isAdvancedChatUniqueConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unique constraint") || strings.Contains(message, "duplicate")
+}
+
+func currentAdvancedChatAdminSettings() advancedChatAdminSettingsResponse {
+	settings := advancedChatAdminSettingsResponse{
+		AttachmentMaxMB:                      advancedChatAttachmentMaxMB(),
+		AttachmentAllowedTypes:               advancedChatAttachmentAllowedTypes(),
+		FileStorageEnabled:                   advancedChatFileStorageEnabled(),
+		FileStorageTotalMB:                   advancedChatFileStorageTotalMB(),
+		FileStorageAutoSaveImagesEnabled:     advancedChatFileStorageAutoSaveImagesEnabled(),
+		FileStorageAutoSaveVideosEnabled:     advancedChatFileStorageAutoSaveVideosEnabled(),
+		BuiltinMCPServers:                    advancedChatBuiltinMCPServers(true),
+		AssistantModeEnabled:                 advancedChatAssistantModeEnabled(),
+		AssistantMCPToolsEnabled:             advancedChatAssistantMCPToolsEnabled(),
+		AssistantConnectorListFilesEnabled:   advancedChatAssistantConnectorListFilesEnabled(),
+		AssistantConnectorReadFileEnabled:    advancedChatAssistantConnectorReadFileEnabled(),
+		AssistantConnectorWriteFileEnabled:   advancedChatAssistantConnectorWriteFileEnabled(),
+		AssistantConnectorReplaceTextEnabled: advancedChatAssistantConnectorReplaceTextEnabled(),
+		AssistantConnectorRunCommandEnabled:  advancedChatAssistantConnectorRunCommandEnabled(),
+		AssistantConnectorWebSearchEnabled:   advancedChatAssistantConnectorWebSearchEnabled(),
+		ScheduledTasksEnabled:                advancedChatScheduledTasksEnabled(),
+		MessageDeliveryEnabled:               advancedChatMessageDeliveryEnabled(),
+		DeliverySystemSMTPEnabled:            advancedChatDeliverySystemSMTPEnabled(),
+	}
+	if !advancedChatPremiumFeaturesAvailable() {
+		settings.FileStorageEnabled = false
+		settings.FileStorageAutoSaveImagesEnabled = false
+		settings.FileStorageAutoSaveVideosEnabled = false
+		settings.ScheduledTasksEnabled = false
+		settings.MessageDeliveryEnabled = false
+		settings.DeliverySystemSMTPEnabled = false
+	}
+	return settings
+}
+
+func currentAdvancedChatUserSettings(userID uint) advancedChatUserSettingsResponse {
+	builtinServers := advancedChatBuiltinMCPServers(false)
+	customServers := advancedChatCustomMCPServers(userID)
+	customServersWithHeaders := advancedChatCustomMCPServersWithHeaders(userID)
+	settings := advancedChatUserSettingsResponse{
+		AttachmentMaxMB:                      advancedChatAttachmentMaxMB(),
+		AttachmentAllowedTypes:               advancedChatAttachmentAllowedTypes(),
+		FileStorageEnabled:                   advancedChatFileStorageEnabled(),
+		FileStorageTotalMB:                   advancedChatFileStorageTotalMB(),
+		FileStorageUsedBytes:                 advancedChatFileStorageUsedBytes(userID),
+		FileStorageAutoSaveImagesEnabled:     advancedChatFileStorageAutoSaveImagesEnabled(),
+		FileStorageAutoSaveVideosEnabled:     advancedChatFileStorageAutoSaveVideosEnabled(),
+		MCPServers:                           mergeAdvancedChatMCPServers(builtinServers, customServers),
+		BuiltinMCPServers:                    builtinServers,
+		CustomMCPServers:                     customServersWithHeaders,
+		AssistantModeEnabled:                 advancedChatAssistantModeEnabled(),
+		AssistantMCPToolsEnabled:             advancedChatAssistantMCPToolsEnabled(),
+		AssistantConnectorListFilesEnabled:   advancedChatAssistantConnectorListFilesEnabled(),
+		AssistantConnectorReadFileEnabled:    advancedChatAssistantConnectorReadFileEnabled(),
+		AssistantConnectorWriteFileEnabled:   advancedChatAssistantConnectorWriteFileEnabled(),
+		AssistantConnectorReplaceTextEnabled: advancedChatAssistantConnectorReplaceTextEnabled(),
+		AssistantConnectorRunCommandEnabled:  advancedChatAssistantConnectorRunCommandEnabled(),
+		AssistantConnectorWebSearchEnabled:   advancedChatAssistantConnectorWebSearchEnabled(),
+		ScheduledTasksEnabled:                advancedChatScheduledTasksEnabled(),
+		MessageDeliveryEnabled:               advancedChatMessageDeliveryEnabled(),
+		DeliverySystemSMTPEnabled:            advancedChatDeliverySystemSMTPEnabled(),
+	}
+	if !advancedChatPremiumFeaturesAvailable() {
+		settings.FileStorageEnabled = false
+		settings.FileStorageUsedBytes = 0
+		settings.FileStorageAutoSaveImagesEnabled = false
+		settings.FileStorageAutoSaveVideosEnabled = false
+		settings.ScheduledTasksEnabled = false
+		settings.MessageDeliveryEnabled = false
+		settings.DeliverySystemSMTPEnabled = false
+	}
+	return settings
+}
+
+func mergeAdvancedChatMCPServers(groups ...[]AdvancedChatMCPServer) []AdvancedChatMCPServer {
+	servers := []AdvancedChatMCPServer{}
+	seen := map[string]struct{}{}
+	for _, group := range groups {
+		for _, server := range group {
+			if _, exists := seen[server.ID]; exists {
+				continue
+			}
+			seen[server.ID] = struct{}{}
+			servers = append(servers, server)
+		}
+	}
+	return servers
+}
+
+func advancedChatAttachmentMaxMB() int {
+	value, err := strconv.Atoi(strings.TrimSpace(model.GetSystemSetting(advancedChatAttachmentMaxMBKey, strconv.Itoa(advancedChatDefaultAttachmentMaxMB))))
+	if err != nil || value < 1 {
+		return advancedChatDefaultAttachmentMaxMB
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}
+
+func advancedChatAttachmentAllowedTypes() []string {
+	raw := model.GetSystemSetting(advancedChatAttachmentAllowedTypesKey, advancedChatDefaultAttachmentTypes)
+	return normalizeAttachmentTypes(strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r'
+	}))
+}
+
+func advancedChatAssistantModeEnabled() bool {
+	return advancedChatSettingBool(advancedChatAssistantModeEnabledKey, true)
+}
+
+func advancedChatAssistantMCPToolsEnabled() bool {
+	return advancedChatSettingBool(advancedChatAssistantMCPToolsEnabledKey, true)
+}
+
+func advancedChatAssistantConnectorListFilesEnabled() bool {
+	return advancedChatSettingBool(advancedChatAssistantConnectorListFilesEnabledKey, true)
+}
+
+func advancedChatAssistantConnectorReadFileEnabled() bool {
+	return advancedChatSettingBool(advancedChatAssistantConnectorReadFileEnabledKey, true)
+}
+
+func advancedChatAssistantConnectorWriteFileEnabled() bool {
+	return advancedChatSettingBool(advancedChatAssistantConnectorWriteFileEnabledKey, true)
+}
+
+func advancedChatAssistantConnectorReplaceTextEnabled() bool {
+	return advancedChatSettingBool(advancedChatAssistantConnectorReplaceTextEnabledKey, true)
+}
+
+func advancedChatAssistantConnectorRunCommandEnabled() bool {
+	return advancedChatSettingBool(advancedChatAssistantConnectorRunCommandEnabledKey, true)
+}
+
+func advancedChatAssistantConnectorWebSearchEnabled() bool {
+	return advancedChatSettingBool(advancedChatAssistantConnectorWebSearchEnabledKey, true)
+}
+
+func advancedChatScheduledTasksEnabled() bool {
+	if !advancedChatPremiumFeaturesAvailable() {
+		return false
+	}
+	return advancedChatSettingBool(advancedChatScheduledTasksEnabledKey, true)
+}
+
+func advancedChatMessageDeliveryEnabled() bool {
+	if !advancedChatPremiumFeaturesAvailable() {
+		return false
+	}
+	return advancedChatSettingBool(advancedChatMessageDeliveryEnabledKey, true)
+}
+
+func advancedChatDeliverySystemSMTPEnabled() bool {
+	if !advancedChatPremiumFeaturesAvailable() {
+		return false
+	}
+	return advancedChatSettingBool(advancedChatDeliverySystemSMTPEnabledKey, true)
+}
+
+func advancedChatAssistantConnectorToolsEnabled() bool {
+	return advancedChatAssistantConnectorListFilesEnabled() ||
+		advancedChatAssistantConnectorReadFileEnabled() ||
+		advancedChatAssistantConnectorWriteFileEnabled() ||
+		advancedChatAssistantConnectorReplaceTextEnabled() ||
+		advancedChatAssistantConnectorRunCommandEnabled() ||
+		advancedChatAssistantConnectorWebSearchEnabled()
+}
+
+func advancedChatAssistantConnectorActionEnabled(action string) bool {
+	switch action {
+	case "list_files":
+		return advancedChatAssistantConnectorListFilesEnabled()
+	case "read_file":
+		return advancedChatAssistantConnectorReadFileEnabled()
+	case "write_file":
+		return advancedChatAssistantConnectorWriteFileEnabled()
+	case "replace_text":
+		return advancedChatAssistantConnectorReplaceTextEnabled()
+	case "run_command":
+		return advancedChatAssistantConnectorRunCommandEnabled()
+	case "web_search":
+		return advancedChatAssistantConnectorWebSearchEnabled()
+	default:
+		return false
+	}
+}
+
+func advancedChatSettingBool(key string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(model.GetSystemSetting(key, strconv.FormatBool(fallback))))
+	switch value {
+	case "1", "true", "yes", "on", "enabled":
+		return true
+	case "0", "false", "no", "off", "disabled":
+		return false
+	default:
+		return fallback
+	}
+}
+
+func advancedChatBuiltinMCPServers(includeHeaders bool) []AdvancedChatMCPServer {
+	raw := strings.TrimSpace(model.GetSystemSetting(advancedChatBuiltinMCPServersKey, "[]"))
+	var servers []AdvancedChatMCPServer
+	if raw != "" {
+		_ = json.Unmarshal([]byte(raw), &servers)
+	}
+	normalized, ok := normalizeMCPServerList(servers, advancedChatMCPModeBackend, includeHeaders)
+	if !ok {
+		return []AdvancedChatMCPServer{}
+	}
+	return normalized
+}
+
+func advancedChatCustomMCPServers(userID uint) []AdvancedChatMCPServer {
+	return advancedChatCustomMCPServersForResponse(userID, false)
+}
+
+func advancedChatCustomMCPServersWithHeaders(userID uint) []AdvancedChatMCPServer {
+	return advancedChatCustomMCPServersForResponse(userID, true)
+}
+
+func advancedChatCustomMCPServersForResponse(userID uint, includeHeaders bool) []AdvancedChatMCPServer {
+	var settings AdvancedChatUserSettings
+	if err := model.DB.Where("user_id = ?", userID).First(&settings).Error; err != nil {
+		return []AdvancedChatMCPServer{}
+	}
+	var servers []AdvancedChatMCPServer
+	if strings.TrimSpace(settings.CustomMCPServers) != "" {
+		_ = json.Unmarshal([]byte(settings.CustomMCPServers), &servers)
+	}
+	normalized, ok := normalizeMCPServerList(servers, advancedChatMCPModeBackend, includeHeaders)
+	if !ok {
+		return []AdvancedChatMCPServer{}
+	}
+	return normalized
+}
+
+func normalizeAttachmentTypes(values []string) []string {
+	types := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		item := strings.ToLower(strings.TrimSpace(value))
+		if item == "" {
+			continue
+		}
+		if len(item) > 100 {
+			continue
+		}
+		if _, exists := seen[item]; exists {
+			continue
+		}
+		seen[item] = struct{}{}
+		types = append(types, item)
+		if len(types) >= 50 {
+			break
+		}
+	}
+	return types
+}
+
+func normalizeMCPServers(c *gin.Context, input []AdvancedChatMCPServer, requestMode string, includeHeaders bool) ([]AdvancedChatMCPServer, bool) {
+	servers, ok := normalizeMCPServerList(input, requestMode, includeHeaders)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid MCP server configuration"})
+		return nil, false
+	}
+	return servers, true
+}
+
+func normalizeMCPServerList(input []AdvancedChatMCPServer, requestMode string, includeHeaders bool) ([]AdvancedChatMCPServer, bool) {
+	if len(input) > 20 {
+		return nil, false
+	}
+	servers := make([]AdvancedChatMCPServer, 0, len(input))
+	seenIDs := map[string]struct{}{}
+	now := time.Now().UnixNano()
+	for index, item := range input {
+		name := strings.TrimSpace(item.Name)
+		if name == "" || len([]rune(name)) > 100 {
+			return nil, false
+		}
+		endpoint := strings.TrimSpace(item.URL)
+		if endpoint == "" || len(endpoint) > 2000 || !validMCPServerURL(endpoint) {
+			return nil, false
+		}
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			id = "mcp-" + strconv.FormatInt(now+int64(index), 36)
+		}
+		if len(id) > 80 {
+			return nil, false
+		}
+		if _, exists := seenIDs[id]; exists {
+			return nil, false
+		}
+		seenIDs[id] = struct{}{}
+		headers := ""
+		if includeHeaders {
+			headers = strings.TrimSpace(item.Headers)
+			if len(headers) > 4000 {
+				return nil, false
+			}
+		}
+		servers = append(servers, AdvancedChatMCPServer{
+			ID:          id,
+			Name:        name,
+			URL:         endpoint,
+			Headers:     headers,
+			Enabled:     item.Enabled,
+			RequestMode: requestMode,
+		})
+	}
+	return servers, true
+}
+
+func validMCPServerURL(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return false
+	}
+	return parsed.Scheme == "http" || parsed.Scheme == "https"
+}

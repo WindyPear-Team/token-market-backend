@@ -30,6 +30,9 @@ func Run() error {
 	if err := service.RunStartupHooks(); err != nil {
 		return err
 	}
+	if err := service.InitCommunityAdvancedChatFeatures(); err != nil {
+		return err
+	}
 
 	// Services
 	authService, err := service.NewAuthService()
@@ -586,11 +589,13 @@ func Run() error {
 		admin.GET("/audit-logs", statsAPI.GetAuditLogs)
 		admin.GET("/stats", statsAPI.GetDashboardStats)
 		admin.GET("/channel-usage", statsAPI.GetChannelUsage)
+		service.RegisterCommunityAdvancedChatAdminRoutes(admin)
 		service.ApplyAdminRouteHooks(admin)
 	}
 
 	// User Self APIs
 	publicAPI := r.Group("/api")
+	service.RegisterCommunityAdvancedChatPublicRoutes(publicAPI)
 	service.ApplyPublicAPIRouteHooks(publicAPI)
 
 	userGroup := r.Group("/api/user")
@@ -646,6 +651,7 @@ func Run() error {
 		userGroup.POST("/api-keys/:id/reset-usage", userAPI.ResetAPIKeyUsage)
 		userGroup.DELETE("/api-keys/:id", userAPI.DeleteAPIKey)
 		userGroup.POST("/api-key/rotate", userAPI.RotateAPIKey)
+		service.RegisterCommunityAdvancedChatUserRoutes(userGroup)
 		service.ApplyUserRouteHooks(userGroup)
 	}
 

@@ -1,0 +1,104 @@
+package service
+
+import (
+	"net/http"
+
+	"github.com/WindyPear-Team/flai/internal/model"
+	"github.com/gin-gonic/gin"
+)
+
+func InitCommunityAdvancedChatFeatures() error {
+	if CurrentEdition() == "premium" {
+		return nil
+	}
+	return model.DB.AutoMigrate(
+		&AdvancedChatAgent{},
+		&AdvancedChatUserSettings{},
+		&AdvancedChatSkill{},
+		&AdvancedChatSession{},
+		&AdvancedChatMessage{},
+		&AdvancedChatRun{},
+		&AdvancedChatRunEvent{},
+		&AdvancedChatConnectorDevice{},
+		&AdvancedChatConnectorTask{},
+	)
+}
+
+func RegisterCommunityAdvancedChatAdminRoutes(group *gin.RouterGroup) {
+	if CurrentEdition() == "premium" {
+		return
+	}
+	api := &advancedChatAPI{}
+	group.GET("/advanced-chat/settings", api.getAdminSettings)
+	group.PUT("/advanced-chat/settings", api.updateAdminSettings)
+}
+
+func RegisterCommunityAdvancedChatUserRoutes(group *gin.RouterGroup) {
+	if CurrentEdition() == "premium" {
+		return
+	}
+	api := &advancedChatAPI{}
+	group.GET("/advanced-chat/settings", api.getUserSettings)
+	group.POST("/advanced-chat/completions", api.completeChat)
+	group.GET("/advanced-chat/sessions", api.listSessions)
+	group.POST("/advanced-chat/sessions", api.saveSession)
+	group.GET("/advanced-chat/sessions/:id", api.getSession)
+	group.PUT("/advanced-chat/sessions/:id", api.saveSession)
+	group.DELETE("/advanced-chat/sessions/:id", api.deleteSession)
+	group.GET("/advanced-chat/runs/:id", api.getRun)
+	group.GET("/advanced-chat/runs/:id/events", api.listRunEvents)
+	group.POST("/advanced-chat/runs/:id/stop", api.stopRun)
+	group.GET("/advanced-chat/runs/:id/connector-tasks/pending", api.listPendingConnectorTasks)
+	group.POST("/advanced-chat/connector-tasks/:id/decision", api.decideConnectorTask)
+	group.GET("/advanced-chat/devices", api.listConnectorDevices)
+	group.POST("/advanced-chat/devices/token", api.createConnectorToken)
+	group.POST("/advanced-chat/devices/:id/token", api.rotateConnectorDeviceToken)
+	group.PUT("/advanced-chat/devices/:id", api.updateConnectorDevice)
+	group.DELETE("/advanced-chat/devices/:id", api.deleteConnectorDevice)
+	group.POST("/advanced-chat/workspace-skills/refresh", api.refreshWorkspaceSkills)
+	group.PUT("/advanced-chat/mcp-servers", api.updateUserMCPServers)
+	group.GET("/advanced-chat/agents", api.listAgents)
+	group.POST("/advanced-chat/agents", api.createAgent)
+	group.PUT("/advanced-chat/agents/:id", api.updateAgent)
+	group.DELETE("/advanced-chat/agents/:id", api.deleteAgent)
+	group.GET("/advanced-chat/skills", api.listSkills)
+	group.POST("/advanced-chat/skills", api.createSkill)
+	group.PUT("/advanced-chat/skills/:id", api.updateSkill)
+	group.DELETE("/advanced-chat/skills/:id", api.deleteSkill)
+}
+
+func RegisterCommunityAdvancedChatPublicRoutes(group *gin.RouterGroup) {
+	if CurrentEdition() == "premium" {
+		return
+	}
+	registerAdvancedChatConnectorRoutes(group)
+}
+
+func currentAdvancedChatUser(c *gin.Context) (*model.User, bool) {
+	user, ok := currentUserFromContext(c)
+	if !ok {
+		return nil, false
+	}
+	return user, true
+}
+
+func writeCommunityAdvancedChatPremiumRequired(c *gin.Context) {
+	c.JSON(http.StatusPaymentRequired, gin.H{"error": "Premium edition is required"})
+}
+
+func advancedChatPremiumFeaturesAvailable() bool {
+	return CurrentEdition() == "premium"
+}
+
+func advancedChatPremiumSettingRequested(input advancedChatAdminSettingsInput) bool {
+	return boolPtrTrue(input.FileStorageEnabled) ||
+		boolPtrTrue(input.FileStorageAutoSaveImagesEnabled) ||
+		boolPtrTrue(input.FileStorageAutoSaveVideosEnabled) ||
+		boolPtrTrue(input.ScheduledTasksEnabled) ||
+		boolPtrTrue(input.MessageDeliveryEnabled) ||
+		boolPtrTrue(input.DeliverySystemSMTPEnabled)
+}
+
+func boolPtrTrue(value *bool) bool {
+	return value != nil && *value
+}

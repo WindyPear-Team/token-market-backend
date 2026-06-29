@@ -312,10 +312,6 @@ func (api *SystemAPI) UpdateSettings(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid chat page mode"})
 			return
 		}
-		if chatPageMode == chatPageModeAdvanced && service.CurrentEdition() != "premium" {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Advanced chat requires premium edition"})
-			return
-		}
 	}
 	if input.MessageChannelEnabled != nil && *input.MessageChannelEnabled && service.CurrentEdition() != "premium" {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Message channel requires premium edition"})
@@ -689,12 +685,9 @@ func publicOAuthProvidersJSON() string {
 }
 
 func currentChatPageMode() string {
-	mode := normalizeChatPageMode(settingString("chat_page_mode", chatPageModeBasic))
+	mode := normalizeChatPageMode(settingString("chat_page_mode", chatPageModeAdvanced))
 	if mode == "" {
-		return chatPageModeBasic
-	}
-	if mode == chatPageModeAdvanced && service.CurrentEdition() != "premium" {
-		return chatPageModeBasic
+		return chatPageModeAdvanced
 	}
 	return mode
 }
