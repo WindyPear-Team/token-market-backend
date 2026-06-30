@@ -1,0 +1,507 @@
+package service
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+
+	"github.com/WindyPear-Team/flai/internal/model"
+	"github.com/gin-gonic/gin"
+)
+
+const (
+	advancedChatAgentStudioCommitDeltaToolName = "workspace_commit_delta"
+	advancedChatAgentStudioInterruptToolName   = "interrupt_sub_agents"
+)
+
+type advancedChatAgentStudioMutation struct {
+	Action     string `json:"action"`
+	Path       string `json:"path"`
+	Content    string `json:"content,omitempty"`
+	OldText    string `json:"old_text,omitempty"`
+	NewText    string `json:"new_text,omitempty"`
+	Overwrite  *bool  `json:"overwrite,omitempty"`
+	CreateDirs *bool  `json:"create_dirs,omitempty"`
+	BaseSHA256 string `json:"base_sha256,omitempty"`
+}
+
+type advancedChatAgentStudioDeltaLog struct {
+	mu        sync.Mutex
+	mutations []advancedChatAgentStudioMutation
+}
+
+type advancedChatDelegatedAgentLoopOptions struct {
+	RunID              string
+	SessionID          string
+	ParentToolCallID   string
+	Observer           advancedChatCompletionObserver
+	OnApprovalRequired func(context.Context, MessageChannelConnectorApproval) error
+	AllowSplit         bool
+	AllowCommit        bool
+	DeltaLog           *advancedChatAgentStudioDeltaLog
+	StatusAgentID      string
+	StatusAgentName    string
+	StatusAgentType    string
+	StatusAgentGroupID string
+}
+
+var advancedChatAgentStudioLocks sync.Map
+
+func advancedChatAgentStudioRole(prepared preparedAdvancedChatAssistantRun) string {
+	if prepared.groupAgent != nil {
+		return normalizeAdvancedChatAgentType(prepared.groupAgent.Type)
+	}
+	if prepared.mode == advancedChatModeAgentGroup {
+		return "worker"
+	}
+	return ""
+}
+
+func advancedChatAgentStudioCanUseExecutionTools(agentType string) bool {
+	return normalizeAdvancedChatAgentType(agentType) != "chief"
+}
+
+func advancedChatAgentStudioConnectorActionAllowed(agentType string, action string) bool {
+	if normalizeAdvancedChatAgentType(agentType) != "chief" {
+		return true
+	}
+	switch strings.TrimSpace(action) {
+	case "list_files", "list_windows_drives", "read_file", "run_command", "web_search", "web_fetch":
+		return true
+	default:
+		return false
+	}
+}
+
+func filterAdvancedChatAgentStudioConnectorTools(agentType string, tools []ChatExecutorTool, bindings map[string]advancedChatConnectorToolBinding) ([]ChatExecutorTool, map[string]advancedChatConnectorToolBinding) {
+	if normalizeAdvancedChatAgentType(agentType) != "chief" {
+		return tools, bindings
+	}
+	filteredTools := make([]ChatExecutorTool, 0, len(tools))
+	filteredBindings := map[string]advancedChatConnectorToolBinding{}
+	for _, tool := range tools {
+		binding, ok := bindings[tool.Name]
+		if !ok || !advancedChatAgentStudioConnectorActionAllowed(agentType, binding.Action) {
+			continue
+		}
+		filteredTools = append(filteredTools, tool)
+		filteredBindings[tool.Name] = binding
+	}
+	return filteredTools, filteredBindings
+}
+
+func advancedChatAgentStudioConnectorTaskRequiresApproval(binding advancedChatConnectorToolBinding, arguments map[string]interface{}, delta *advancedChatAgentStudioDeltaLog) bool {
+	if delta != nil {
+		switch binding.Action {
+		case "write_file", "replace_text":
+			return false
+		}
+	}
+	return advancedChatConnectorTaskRequiresApproval(binding, arguments)
+}
+
+func advancedChatAgentStudioCanSplit(agentType string) bool {
+	return advancedChatAgentStudioCanUseExecutionTools(agentType)
+}
+
+func advancedChatAgentStudioCanDelegate(agentType string, hasGroupAgent bool) bool {
+	if !hasGroupAgent {
+		return true
+	}
+	return normalizeAdvancedChatAgentType(agentType) == "chief"
+}
+
+func advancedChatAgentStudioPrompt(agentType string, hasConnector bool) string {
+	agentType = normalizeAdvancedChatAgentType(agentType)
+	if agentType == "chief" {
+		return strings.TrimSpace(`Agent Studio role boundary:
+- You are the Chief Agent. Keep management authority separate from execution authority.
+- Do not edit files or create split sub-agents yourself.
+- You may use connector browsing tools and approved commands to inspect context. Commands must be diagnostic/read-only; delegate modifications to employees.
+- Use agent_delegate to assign concrete task lists to worker, critic, or reviewer main agents.
+- For implementation work, delegate to employees. For final physical commit of merged changes, delegate review and commit to a reviewer.
+- When the human sends new information for running sub-agents, use interrupt_sub_agents to deliver that message to them.`)
+	}
+	if !hasConnector {
+		return ""
+	}
+	return strings.TrimSpace(`Agent Studio execution model:
+- You are an employee main agent. Use the fast path for simple, deterministic local edits.
+- Use agent_split for complex work that benefits from parallel temporary sub-agents.
+- Split sub-agents work on a deferred virtual filesystem: their file writes become MutationLog entries and are not physically written to disk.
+- When split results include MutationLog entries, merge and reason about them before reporting. Reviewer agents can use workspace_commit_delta for final physical commit after conflict review.
+- Use interrupt_sub_agents when the human or caller sends new information that should be delivered to running sub-agents.`)
+}
+
+func advancedChatAgentStudioConnectorSystemPrompt(agentType string, device *AdvancedChatConnectorDevice, workspacePath string) string {
+	if normalizeAdvancedChatAgentType(agentType) != "chief" {
+		return advancedChatConnectorSystemPrompt(device, workspacePath)
+	}
+	if device == nil {
+		return ""
+	}
+	workspacePath = strings.TrimSpace(workspacePath)
+	osName := strings.TrimSpace(device.OS)
+	if osName == "" {
+		osName = "unknown"
+	}
+	archName := strings.TrimSpace(device.Arch)
+	if archName == "" {
+		archName = "unknown"
+	}
+	if workspacePath == "" {
+		windowsPathHint := ""
+		if strings.EqualFold(device.OS, "windows") {
+			windowsPathHint = "\nThe connected device is Windows. Use workspace_list_windows_drives to discover available drive roots before selecting absolute paths when the drive is not already known."
+		}
+		return fmt.Sprintf(`A local device connector is available to the Chief Agent for inspection only.
+Device: %s
+Environment: OS=%s Arch=%s
+Use workspace listing, file reading, web search/fetch, and diagnostic commands to understand the environment.
+Do not modify files or run commands that change local state. Delegate any implementation or file-changing work to employee agents.
+Absolute paths are allowed. Ask for or infer concrete paths before reading files.%s
+Read-only workspace tools, web search, web fetch, and Windows drive listing do not require approval. Commands always require approval unless the command starts with a prefix explicitly allowed in the message channel settings.`, device.Name, osName, archName, windowsPathHint)
+	}
+	return fmt.Sprintf(`A local workspace connector is available to the Chief Agent for inspection only.
+Device: %s
+Environment: OS=%s Arch=%s
+Workspace: %s
+Use workspace listing, file reading, web search/fetch, and diagnostic commands to understand this workspace.
+Do not modify files or run commands that change local state. Delegate any implementation or file-changing work to employee agents.
+Use only relative paths in workspace tool arguments.
+Read-only workspace tools, web search, and web fetch do not require approval. Commands always require approval unless the command starts with a prefix explicitly allowed in the session settings.`, device.Name, osName, archName, workspacePath)
+}
+
+func advancedChatAgentStudioCommitDeltaTool() ChatExecutorTool {
+	return ChatExecutorTool{
+		Name:        advancedChatAgentStudioCommitDeltaToolName,
+		Description: "Reviewer-only final commit tool. Apply a reviewed, conflict-free MutationLog to the connected workspace as the physical disk commit.",
+		Schema: map[string]interface{}{
+			"type":     "object",
+			"required": []string{"mutations"},
+			"properties": map[string]interface{}{
+				"mutations": map[string]interface{}{
+					"type":        "array",
+					"description": "Ordered MutationLog entries produced by split agents and reviewed for conflicts.",
+					"items": map[string]interface{}{
+						"type":     "object",
+						"required": []string{"action", "path"},
+						"properties": map[string]interface{}{
+							"action":      map[string]interface{}{"type": "string", "enum": []string{"write_file", "replace_text"}},
+							"path":        map[string]interface{}{"type": "string"},
+							"content":     map[string]interface{}{"type": "string"},
+							"old_text":    map[string]interface{}{"type": "string"},
+							"new_text":    map[string]interface{}{"type": "string"},
+							"overwrite":   map[string]interface{}{"type": "boolean"},
+							"create_dirs": map[string]interface{}{"type": "boolean"},
+							"base_sha256": map[string]interface{}{"type": "string"},
+						},
+					},
+				},
+				"mutation_log": map[string]interface{}{"type": "string", "description": "Optional JSON encoded MutationLog. Used only when mutations is omitted."},
+			},
+		},
+	}
+}
+
+func advancedChatAgentStudioInterruptTool() ChatExecutorTool {
+	return ChatExecutorTool{
+		Name:        advancedChatAgentStudioInterruptToolName,
+		Description: "Interrupt split sub-agents and send them a new message or directive. Returns recent sub-agent snapshots so the caller can answer with current context.",
+		Schema: map[string]interface{}{
+			"type":     "object",
+			"required": []string{"message"},
+			"properties": map[string]interface{}{
+				"agent_id": map[string]interface{}{"type": "string", "description": "Optional agent id or split task label to filter."},
+				"message":  map[string]interface{}{"type": "string", "description": "New information, question, or directive to deliver to the selected sub-agents."},
+			},
+		},
+	}
+}
+
+func advancedChatAgentStudioLockKey(userID uint, groupID string, agentID string) string {
+	return fmt.Sprintf("%d:%s:%s", userID, strings.TrimSpace(groupID), strings.TrimSpace(agentID))
+}
+
+func withAdvancedChatAgentStudioLock(userID uint, groupID string, agentID string, fn func() (string, error)) (string, error) {
+	key := advancedChatAgentStudioLockKey(userID, groupID, agentID)
+	value, _ := advancedChatAgentStudioLocks.LoadOrStore(key, &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	mutex.Lock()
+	defer mutex.Unlock()
+	return fn()
+}
+
+func executeAdvancedChatConnectorToolForAgent(ctx context.Context, userID uint, runID string, binding advancedChatConnectorToolBinding, arguments map[string]interface{}, delta *advancedChatAgentStudioDeltaLog) (string, error) {
+	if delta == nil {
+		return callAdvancedChatConnectorToolExpanded(ctx, userID, runID, binding, arguments)
+	}
+	switch binding.Action {
+	case "read_file":
+		content, err := callAdvancedChatConnectorToolExpanded(ctx, userID, runID, binding, arguments)
+		if err != nil {
+			return content, err
+		}
+		path, _ := arguments["path"].(string)
+		virtual := delta.applyToPath(path, content)
+		if maxBytes, ok := intFromConnectorArgument(arguments["max_bytes"]); ok && maxBytes > 0 {
+			virtual = truncateBytes(virtual, maxBytes)
+		}
+		return virtual, nil
+	case "write_file":
+		mutation := advancedChatAgentStudioMutation{
+			Action:     "write_file",
+			Path:       stringFromMap(arguments, "path"),
+			Content:    stringFromMap(arguments, "content"),
+			BaseSHA256: sha256Hex(""),
+		}
+		if value, ok := boolFromConnectorArgument(arguments["overwrite"]); ok {
+			mutation.Overwrite = &value
+		}
+		if value, ok := boolFromConnectorArgument(arguments["create_dirs"]); ok {
+			mutation.CreateDirs = &value
+		}
+		delta.append(mutation)
+		return "Deferred write captured in MutationLog. No physical file was changed.", nil
+	case "replace_text":
+		mutations := advancedChatAgentStudioMutationsFromReplaceArguments(arguments)
+		for _, mutation := range mutations {
+			delta.append(mutation)
+		}
+		return fmt.Sprintf("Deferred %d text replacement(s) captured in MutationLog. No physical file was changed.", len(mutations)), nil
+	default:
+		return callAdvancedChatConnectorToolExpanded(ctx, userID, runID, binding, arguments)
+	}
+}
+
+func commitAdvancedChatAgentStudioDelta(ctx context.Context, userID uint, runID string, binding advancedChatConnectorToolBinding, arguments map[string]interface{}) (string, error) {
+	mutations, err := parseAdvancedChatAgentStudioMutations(arguments)
+	if err != nil {
+		return "", err
+	}
+	if len(mutations) == 0 {
+		return "", errors.New("mutations are required")
+	}
+	results := make([]string, 0, len(mutations))
+	for index, mutation := range mutations {
+		action := strings.TrimSpace(mutation.Action)
+		if action == "" {
+			return strings.Join(results, "\n"), fmt.Errorf("mutation %d is missing action", index+1)
+		}
+		callBinding := binding
+		callArguments := map[string]interface{}{"path": mutation.Path}
+		switch action {
+		case "write_file":
+			callBinding.Action = "write_file"
+			callArguments["content"] = mutation.Content
+			if mutation.Overwrite != nil {
+				callArguments["overwrite"] = *mutation.Overwrite
+			}
+			if mutation.CreateDirs != nil {
+				callArguments["create_dirs"] = *mutation.CreateDirs
+			}
+		case "replace_text":
+			callBinding.Action = "replace_text"
+			callArguments["old_text"] = mutation.OldText
+			callArguments["new_text"] = mutation.NewText
+		default:
+			return strings.Join(results, "\n"), fmt.Errorf("unsupported mutation action %q", action)
+		}
+		result, err := callAdvancedChatConnectorToolExpanded(ctx, userID, runID, callBinding, callArguments)
+		if strings.TrimSpace(result) != "" {
+			results = append(results, result)
+		}
+		if err != nil {
+			return strings.Join(results, "\n"), err
+		}
+	}
+	if len(results) == 0 {
+		return fmt.Sprintf("Committed %d mutation(s).", len(mutations)), nil
+	}
+	return fmt.Sprintf("Committed %d mutation(s).\n%s", len(mutations), strings.Join(results, "\n")), nil
+}
+
+func interruptAdvancedChatAgentStudioSubAgents(runID string, sessionID string, userID uint, arguments map[string]interface{}) (string, error) {
+	agentID := strings.TrimSpace(stringFromMap(arguments, "agent_id"))
+	message := strings.TrimSpace(stringFromMap(arguments, "message"))
+	if message == "" {
+		return "", errors.New("message is required")
+	}
+	var events []AdvancedChatRunEvent
+	if err := model.DB.Where("run_id = ? AND user_id = ? AND event = ?", runID, userID, "agent_task").
+		Order("seq DESC").
+		Limit(20).
+		Find(&events).Error; err != nil {
+		return "", err
+	}
+	items := make([]map[string]interface{}, 0, len(events))
+	for _, event := range events {
+		payload := map[string]interface{}{}
+		_ = json.Unmarshal([]byte(event.Payload), &payload)
+		if agentID != "" {
+			id, _ := payload["agent_id"].(string)
+			name, _ := payload["agent_name"].(string)
+			if id != agentID && name != agentID {
+				continue
+			}
+		}
+		items = append(items, payload)
+	}
+	_ = appendAdvancedChatRunEvent(runID, sessionID, userID, "agent_task", gin.H{
+		"status":   "interrupted",
+		"agent_id": agentID,
+		"message":  message,
+	})
+	data, err := json.Marshal(gin.H{"interrupted": true, "message": message, "sub_agents": items})
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func (d *advancedChatAgentStudioDeltaLog) append(mutation advancedChatAgentStudioMutation) {
+	if d == nil {
+		return
+	}
+	mutation.Action = strings.TrimSpace(mutation.Action)
+	mutation.Path = strings.TrimSpace(mutation.Path)
+	if mutation.Action == "" || mutation.Path == "" {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.mutations = append(d.mutations, mutation)
+}
+
+func (d *advancedChatAgentStudioDeltaLog) snapshot() []advancedChatAgentStudioMutation {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	result := make([]advancedChatAgentStudioMutation, len(d.mutations))
+	copy(result, d.mutations)
+	return result
+}
+
+func (d *advancedChatAgentStudioDeltaLog) applyToPath(path string, base string) string {
+	path = strings.TrimSpace(path)
+	result := base
+	for _, mutation := range d.snapshot() {
+		if strings.TrimSpace(mutation.Path) != path {
+			continue
+		}
+		switch mutation.Action {
+		case "write_file":
+			result = mutation.Content
+		case "replace_text":
+			result = strings.Replace(result, mutation.OldText, mutation.NewText, 1)
+		}
+	}
+	return result
+}
+
+func advancedChatAgentStudioMutationsFromReplaceArguments(arguments map[string]interface{}) []advancedChatAgentStudioMutation {
+	calls := expandAdvancedChatConnectorToolArguments(advancedChatConnectorToolBinding{Action: "replace_text"}, arguments)
+	mutations := make([]advancedChatAgentStudioMutation, 0, len(calls))
+	for _, call := range calls {
+		mutations = append(mutations, advancedChatAgentStudioMutation{
+			Action:     "replace_text",
+			Path:       stringFromMap(call, "path"),
+			OldText:    stringFromMap(call, "old_text"),
+			NewText:    stringFromMap(call, "new_text"),
+			BaseSHA256: sha256Hex(""),
+		})
+	}
+	return mutations
+}
+
+func parseAdvancedChatAgentStudioMutations(arguments map[string]interface{}) ([]advancedChatAgentStudioMutation, error) {
+	if raw, ok := arguments["mutations"]; ok {
+		data, err := json.Marshal(raw)
+		if err != nil {
+			return nil, err
+		}
+		var mutations []advancedChatAgentStudioMutation
+		if err := json.Unmarshal(data, &mutations); err != nil {
+			return nil, err
+		}
+		return normalizeAdvancedChatAgentStudioMutations(mutations), nil
+	}
+	if raw := strings.TrimSpace(stringFromMap(arguments, "mutation_log")); raw != "" {
+		var payload struct {
+			Mutations []advancedChatAgentStudioMutation `json:"mutations"`
+		}
+		if err := json.Unmarshal([]byte(raw), &payload); err == nil && len(payload.Mutations) > 0 {
+			return normalizeAdvancedChatAgentStudioMutations(payload.Mutations), nil
+		}
+		var mutations []advancedChatAgentStudioMutation
+		if err := json.Unmarshal([]byte(raw), &mutations); err != nil {
+			return nil, err
+		}
+		return normalizeAdvancedChatAgentStudioMutations(mutations), nil
+	}
+	return nil, nil
+}
+
+func normalizeAdvancedChatAgentStudioMutations(input []advancedChatAgentStudioMutation) []advancedChatAgentStudioMutation {
+	result := make([]advancedChatAgentStudioMutation, 0, len(input))
+	for _, mutation := range input {
+		mutation.Action = strings.TrimSpace(mutation.Action)
+		mutation.Path = strings.TrimSpace(mutation.Path)
+		if mutation.Action == "" || mutation.Path == "" {
+			continue
+		}
+		result = append(result, mutation)
+		if len(result) >= 200 {
+			break
+		}
+	}
+	return result
+}
+
+func intFromConnectorArgument(value interface{}) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int64:
+		return int(typed), true
+	case float64:
+		return int(typed), true
+	case json.Number:
+		number, err := typed.Int64()
+		return int(number), err == nil
+	default:
+		return 0, false
+	}
+}
+
+func boolFromConnectorArgument(value interface{}) (bool, bool) {
+	switch typed := value.(type) {
+	case bool:
+		return typed, true
+	default:
+		return false, false
+	}
+}
+
+func sha256Hex(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func filterAdvancedChatToolsByName(tools []ChatExecutorTool, excluded map[string]bool) []ChatExecutorTool {
+	result := make([]ChatExecutorTool, 0, len(tools))
+	for _, tool := range tools {
+		if excluded[tool.Name] {
+			continue
+		}
+		result = append(result, tool)
+	}
+	return result
+}

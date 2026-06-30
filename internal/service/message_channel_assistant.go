@@ -23,6 +23,7 @@ type MessageChannelAssistantRequest struct {
 	ConnectorWorkspaceUnrestricted bool
 	ConnectorAutoApprove           bool
 	ConnectorCommandPrefixes       []string
+	AgentGroupID                   string
 	MaxTokens                      int
 	Temperature                    *float64
 	ReasoningEffort                string
@@ -51,7 +52,9 @@ func ExecuteMessageChannelAssistantCompletion(user *model.User, req MessageChann
 	if !advancedChatAssistantModeEnabled() {
 		return nil, errors.New("assistant mode is disabled")
 	}
-	if !advancedChatAssistantConnectorToolsEnabled() {
+	agentGroupID := strings.TrimSpace(req.AgentGroupID)
+	wantsConnector := strings.TrimSpace(req.ConnectorDeviceID) != "" || strings.TrimSpace(req.ConnectorWorkspacePath) != "" || req.ConnectorWorkspaceUnrestricted
+	if wantsConnector && !advancedChatAssistantConnectorToolsEnabled() {
 		return nil, errors.New("workspace tools are disabled")
 	}
 	ctx := req.Context
@@ -70,13 +73,18 @@ func ExecuteMessageChannelAssistantCompletion(user *model.User, req MessageChann
 		}
 	}
 	agentGroups := []advancedChatAgentGroup{}
-	if device != nil {
-		if loaded, loadErr := loadAdvancedChatAgentGroupsForRun(ctx, user.ID, device); loadErr == nil {
-			agentGroups = loaded
+	if agentGroupID != "" {
+		if loaded, loadErr := readAdvancedChatAgentGroup(ctx, user.ID, nil, agentGroupID); loadErr == nil && loaded.ID != "" {
+			agentGroups = []advancedChatAgentGroup{loaded}
 		}
 	}
-	tools, connectorBindings := advancedChatConnectorTools(device, workspacePath, req.ConnectorAutoApprove, req.ConnectorCommandPrefixes)
-	connectorTools := append([]ChatExecutorTool{}, tools...)
+	allConnectorTools, allConnectorBindings := advancedChatConnectorTools(device, workspacePath, req.ConnectorAutoApprove, req.ConnectorCommandPrefixes)
+	tools := allConnectorTools
+	connectorBindings := allConnectorBindings
+	if len(agentGroups) > 0 {
+		tools, connectorBindings = filterAdvancedChatAgentStudioConnectorTools("chief", allConnectorTools, allConnectorBindings)
+	}
+	connectorTools := append([]ChatExecutorTool{}, allConnectorTools...)
 	if len(agentGroups) > 0 {
 		tools = append(tools, advancedChatAgentDelegateTool(agentGroups))
 	}
@@ -93,6 +101,11 @@ func ExecuteMessageChannelAssistantCompletion(user *model.User, req MessageChann
 	}
 	if prompt := advancedChatAgentGroupSystemPrompt(agentGroups); strings.TrimSpace(prompt) != "" {
 		systemParts = append(systemParts, prompt)
+	}
+	if len(agentGroups) > 0 {
+		if prompt := advancedChatAgentStudioPrompt("chief", device != nil); strings.TrimSpace(prompt) != "" {
+			systemParts = append(systemParts, prompt)
+		}
 	}
 	if prompt := advancedChatConnectorSystemPrompt(device, workspacePath); strings.TrimSpace(prompt) != "" {
 		systemParts = append(systemParts, prompt)
@@ -196,9 +209,10 @@ func ExecuteMessageChannelAssistantCompletion(user *model.User, req MessageChann
 						WorkspaceSkills:    workspaceSkills,
 						ConnectorDevice:    device,
 						ConnectorWorkspace: workspacePath,
-						ConnectorBindings:  connectorBindings,
+						ConnectorBindings:  allConnectorBindings,
 						ConnectorTools:     connectorTools,
 						Groups:             agentGroups,
+						OnApprovalRequired: req.OnApprovalRequired,
 						Arguments:          arguments,
 					})
 					if err != nil {

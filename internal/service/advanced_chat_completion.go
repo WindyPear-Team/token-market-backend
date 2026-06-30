@@ -167,17 +167,23 @@ func (api *advancedChatAPI) completeChat(c *gin.Context) {
 		c.JSON(status, gin.H{"error": message})
 		return
 	}
-	skills, err := loadAdvancedChatSkills(user.ID, input.SkillIDs)
+	skillIDs := input.SkillIDs
+	mcpServerIDs := input.MCPServerIDs
+	if agent != nil {
+		skillIDs = uniqueStringsLocal(append(decodeStringList(agent.SkillIDs), skillIDs...))
+		mcpServerIDs = uniqueStringsLocal(append(decodeStringList(agent.MCPServerIDs), mcpServerIDs...))
+	}
+	skills, err := loadAdvancedChatSkills(user.ID, skillIDs)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load skills"})
 		return
 	}
-	if len(skills) != len(uniqueStringsLocal(input.SkillIDs)) {
+	if len(skills) != len(uniqueStringsLocal(skillIDs)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Unknown skill"})
 		return
 	}
 
-	serverIDs := uniqueStringsLocal(append(input.MCPServerIDs, skillMCPIDs(skills)...))
+	serverIDs := uniqueStringsLocal(append(mcpServerIDs, skillMCPIDs(skills)...))
 	servers, err := loadAdvancedChatMCPServersForCall(user.ID, serverIDs)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -420,6 +426,7 @@ func loadAdvancedChatAgent(userID uint, rawID string) (*AdvancedChatAgent, error
 	if err := model.DB.Where("id = ? AND user_id = ?", id, userID).First(&agent).Error; err != nil {
 		return nil, err
 	}
+	hydrateAdvancedChatAgentLists(&agent)
 	return &agent, nil
 }
 

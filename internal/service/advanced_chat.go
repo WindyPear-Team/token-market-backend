@@ -21,8 +21,24 @@ type AdvancedChatAgent struct {
 	Name         string     `gorm:"uniqueIndex:idx_advanced_chat_agent_user_name;size:100;not null" json:"name"`
 	Prompt       string     `gorm:"type:text;not null" json:"prompt"`
 	DefaultModel string     `gorm:"size:100;not null" json:"default_model"`
+	SkillIDs     string     `gorm:"type:text;not null;default:'[]'" json:"-"`
+	Skills       []string   `gorm:"-" json:"skill_ids"`
+	MCPServerIDs string     `gorm:"type:text;not null;default:'[]'" json:"-"`
+	MCPServers   []string   `gorm:"-" json:"mcp_server_ids"`
 	CreatedAt    time.Time  `json:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+type AdvancedChatAgentStudio struct {
+	ID          uint       `gorm:"primaryKey" json:"-"`
+	UserID      uint       `gorm:"uniqueIndex:idx_advanced_chat_agent_studio_user_studio;not null" json:"user_id"`
+	User        model.User `gorm:"foreignKey:UserID" json:"-"`
+	StudioID    string     `gorm:"uniqueIndex:idx_advanced_chat_agent_studio_user_studio;size:80;not null" json:"id"`
+	Name        string     `gorm:"size:120;not null" json:"name"`
+	Description string     `gorm:"type:text;not null" json:"description"`
+	Agents      string     `gorm:"type:text;not null" json:"-"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 type AdvancedChatUserSettings struct {
@@ -59,9 +75,11 @@ type AdvancedChatMCPServer struct {
 type advancedChatAPI struct{}
 
 type advancedChatAgentInput struct {
-	Name         string `json:"name"`
-	Prompt       string `json:"prompt"`
-	DefaultModel string `json:"default_model"`
+	Name         string   `json:"name"`
+	Prompt       string   `json:"prompt"`
+	DefaultModel string   `json:"default_model"`
+	SkillIDs     []string `json:"skill_ids"`
+	MCPServerIDs []string `json:"mcp_server_ids"`
 }
 
 type advancedChatAdminSettingsResponse struct {
@@ -173,6 +191,7 @@ const (
 func initAdvancedChatFeatures() error {
 	err := model.DB.AutoMigrate(
 		&AdvancedChatAgent{},
+		&AdvancedChatAgentStudio{},
 		&AdvancedChatUserSettings{},
 		&AdvancedChatSkill{},
 		&AdvancedChatSession{},
@@ -397,6 +416,9 @@ func (api *advancedChatAPI) listAgents(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list agents"})
 		return
 	}
+	for i := range agents {
+		hydrateAdvancedChatAgentLists(&agents[i])
+	}
 	c.JSON(http.StatusOK, agents)
 }
 
@@ -424,6 +446,7 @@ func (api *advancedChatAPI) createAgent(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create agent"})
 		return
 	}
+	hydrateAdvancedChatAgentLists(&agent)
 	c.JSON(http.StatusOK, agent)
 }
 
@@ -454,9 +477,11 @@ func (api *advancedChatAPI) updateAgent(c *gin.Context) {
 		return
 	}
 	if err := model.DB.Model(&agent).Updates(map[string]interface{}{
-		"name":          next.Name,
-		"prompt":        next.Prompt,
-		"default_model": next.DefaultModel,
+		"name":           next.Name,
+		"prompt":         next.Prompt,
+		"default_model":  next.DefaultModel,
+		"skill_ids":      next.SkillIDs,
+		"mcp_server_ids": next.MCPServerIDs,
 	}).Error; err != nil {
 		if isAdvancedChatUniqueConstraintError(err) {
 			c.JSON(http.StatusConflict, gin.H{"error": "Agent name already exists"})
@@ -466,6 +491,7 @@ func (api *advancedChatAPI) updateAgent(c *gin.Context) {
 		return
 	}
 	model.DB.First(&agent, agent.ID)
+	hydrateAdvancedChatAgentLists(&agent)
 	c.JSON(http.StatusOK, agent)
 }
 
@@ -693,12 +719,40 @@ func advancedChatAgentFromInput(c *gin.Context, userID uint, input advancedChatA
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Agent prompt is too long"})
 		return AdvancedChatAgent{}, false
 	}
+	skillIDs := uniqueStringsLocal(input.SkillIDs)
+	if len(skillIDs) > 0 {
+		skills, err := loadAdvancedChatSkills(userID, skillIDs)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load skills"})
+			return AdvancedChatAgent{}, false
+		}
+		if len(skills) != len(skillIDs) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Unknown skill"})
+			return AdvancedChatAgent{}, false
+		}
+	}
+	mcpServerIDs, ok := normalizeSkillMCPServerIDs(c, userID, input.MCPServerIDs)
+	if !ok {
+		return AdvancedChatAgent{}, false
+	}
+	skillIDsJSON, _ := json.Marshal(skillIDs)
+	mcpServerIDsJSON, _ := json.Marshal(mcpServerIDs)
 	return AdvancedChatAgent{
 		UserID:       userID,
 		Name:         name,
 		Prompt:       prompt,
 		DefaultModel: defaultModel,
+		SkillIDs:     string(skillIDsJSON),
+		MCPServerIDs: string(mcpServerIDsJSON),
 	}, true
+}
+
+func hydrateAdvancedChatAgentLists(agent *AdvancedChatAgent) {
+	if agent == nil {
+		return
+	}
+	agent.Skills = decodeStringList(agent.SkillIDs)
+	agent.MCPServers = decodeStringList(agent.MCPServerIDs)
 }
 
 func isAdvancedChatUniqueConstraintError(err error) bool {

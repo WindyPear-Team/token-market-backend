@@ -27,6 +27,8 @@ const (
 	advancedChatRunStatusCancelled = "cancelled"
 )
 
+var advancedChatRunEventLocks sync.Map
+
 type AdvancedChatSession struct {
 	ID                       string     `gorm:"primaryKey;size:80" json:"id"`
 	UserID                   uint       `gorm:"index;not null" json:"user_id"`
@@ -456,9 +458,17 @@ func stopAdvancedChatRun(rawRunID string, userID uint) (AdvancedChatRun, int, st
 		return run, http.StatusOK, "", nil
 	}
 
+	lockKey := fmt.Sprintf("%d:%s", userID, strings.TrimSpace(run.ID))
+	value, _ := advancedChatRunEventLocks.LoadOrStore(lockKey, &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	mutex.Lock()
 	now := time.Now()
 	stopped := false
 	err := model.DB.Transaction(func(tx *gorm.DB) error {
+		var currentRun AdvancedChatRun
+		if err := tx.Where("id = ? AND user_id = ?", run.ID, userID).First(&currentRun).Error; err != nil {
+			return err
+		}
 		update := tx.Model(&AdvancedChatRun{}).
 			Where("id = ? AND user_id = ? AND status IN ?", run.ID, userID, []string{advancedChatRunStatusQueued, advancedChatRunStatusRunning}).
 			Updates(map[string]interface{}{
@@ -479,6 +489,23 @@ func stopAdvancedChatRun(rawRunID string, userID uint) (AdvancedChatRun, int, st
 			Update("content", "Stopped").Error; err != nil {
 			return err
 		}
+		details, changed := cancelActiveAdvancedChatToolCalls(decodeAdvancedChatToolCalls(currentRun.ToolCallDetails), "Cancelled by user.")
+		if changed {
+			encoded, err := json.Marshal(details)
+			if err != nil {
+				return err
+			}
+			if err := tx.Model(&AdvancedChatRun{}).
+				Where("id = ? AND user_id = ?", run.ID, userID).
+				Updates(map[string]interface{}{"tool_call_details": string(encoded), "tool_calls": len(details)}).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&AdvancedChatMessage{}).
+				Where("id = ? AND user_id = ?", run.AssistantMessageID, userID).
+				Update("tool_calls", string(encoded)).Error; err != nil {
+				return err
+			}
+		}
 		taskUpdate := tx.Model(&AdvancedChatConnectorTask{}).
 			Where("run_id = ? AND user_id = ? AND status IN ?", run.ID, userID, []string{
 				advancedChatConnectorTaskStatusPendingApproval,
@@ -497,6 +524,7 @@ func stopAdvancedChatRun(rawRunID string, userID uint) (AdvancedChatRun, int, st
 		stopped = true
 		return nil
 	})
+	mutex.Unlock()
 	if err != nil {
 		return run, http.StatusInternalServerError, "Failed to stop run", err
 	}
@@ -507,6 +535,7 @@ func stopAdvancedChatRun(rawRunID string, userID uint) (AdvancedChatRun, int, st
 			}
 		}
 		_ = appendAdvancedChatRunEvent(run.ID, run.SessionID, userID, "status", gin.H{"message": "cancelled"})
+		cancelRunningAdvancedChatAgentTasks(run.ID, run.SessionID, userID)
 	}
 	if err := model.DB.Where("id = ? AND user_id = ?", run.ID, userID).First(&run).Error; err != nil {
 		return run, http.StatusInternalServerError, "Failed to load stopped run", err
@@ -529,10 +558,34 @@ func ensureAdvancedChatRunNotCancelled(runID string, userID uint) error {
 	return nil
 }
 
+func interruptActiveAdvancedChatRunsForSession(userID uint, rawSessionID string, reason string) error {
+	sessionID := normalizeAdvancedChatSessionID(rawSessionID)
+	if sessionID == "" {
+		return nil
+	}
+	var runs []AdvancedChatRun
+	if err := model.DB.
+		Where("session_id = ? AND user_id = ? AND status IN ?", sessionID, userID, []string{advancedChatRunStatusQueued, advancedChatRunStatusRunning}).
+		Find(&runs).Error; err != nil {
+		return err
+	}
+	for _, run := range runs {
+		if _, _, _, err := stopAdvancedChatRun(run.ID, userID); err != nil {
+			return err
+		}
+		_ = appendAdvancedChatRunEvent(run.ID, run.SessionID, userID, "status", gin.H{"message": "user_interrupted", "code": strings.TrimSpace(reason)})
+	}
+	return nil
+}
+
 func (api *advancedChatAPI) startAssistantCompletionRun(c *gin.Context, user *model.User, input advancedChatCompletionInput, messages []advancedChatCompletionMessage, modelName string) {
 	prepared, status, message, err := prepareAdvancedChatAssistantRun(c.Request.Context(), user.ID, input, messages, modelName)
 	if err != nil {
 		c.JSON(status, gin.H{"error": message})
+		return
+	}
+	if err := interruptActiveAdvancedChatRunsForSession(user.ID, prepared.input.SessionID, "USER_INTERRUPTED"); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to interrupt active run"})
 		return
 	}
 	session, run, status, message, err := createAdvancedChatAssistantRun(user.ID, prepared)
@@ -564,11 +617,8 @@ func prepareAdvancedChatAssistantRun(ctx context.Context, userID uint, input adv
 	if mode == advancedChatModeAgentGroup {
 		input.ConnectorDeviceID = strings.TrimSpace(input.ConnectorDeviceID)
 		input.AgentGroupID = strings.TrimSpace(input.AgentGroupID)
-		if input.ConnectorDeviceID == "" {
-			return preparedAdvancedChatAssistantRun{}, http.StatusBadRequest, "Connector device is required for agent group mode", errors.New("connector device required")
-		}
 		if input.AgentGroupID == "" {
-			return preparedAdvancedChatAssistantRun{}, http.StatusBadRequest, "Agent group is required", errors.New("agent group required")
+			return preparedAdvancedChatAssistantRun{}, http.StatusBadRequest, "Studio is required", errors.New("studio required")
 		}
 	} else {
 		agent, err = loadAdvancedChatAgent(userID, input.AgentID)
@@ -578,14 +628,20 @@ func prepareAdvancedChatAssistantRun(ctx context.Context, userID uint, input adv
 			}
 			return preparedAdvancedChatAssistantRun{}, http.StatusInternalServerError, "Failed to load agent", err
 		}
-		skills, err = loadAdvancedChatSkills(userID, input.SkillIDs)
+		skillIDs := input.SkillIDs
+		mcpServerIDs := input.MCPServerIDs
+		if agent != nil {
+			skillIDs = uniqueStringsLocal(append(decodeStringList(agent.SkillIDs), skillIDs...))
+			mcpServerIDs = uniqueStringsLocal(append(decodeStringList(agent.MCPServerIDs), mcpServerIDs...))
+		}
+		skills, err = loadAdvancedChatSkills(userID, skillIDs)
 		if err != nil {
 			return preparedAdvancedChatAssistantRun{}, http.StatusInternalServerError, "Failed to load skills", err
 		}
-		if len(skills) != len(uniqueStringsLocal(input.SkillIDs)) {
+		if len(skills) != len(uniqueStringsLocal(skillIDs)) {
 			return preparedAdvancedChatAssistantRun{}, http.StatusBadRequest, "Unknown skill", errors.New("unknown skill")
 		}
-		serverIDs := uniqueStringsLocal(append(input.MCPServerIDs, skillMCPIDs(skills)...))
+		serverIDs := uniqueStringsLocal(append(mcpServerIDs, skillMCPIDs(skills)...))
 		servers, err = loadAdvancedChatMCPServersForCall(userID, serverIDs)
 		if len(serverIDs) > 0 && !advancedChatAssistantMCPToolsEnabled() {
 			return preparedAdvancedChatAssistantRun{}, http.StatusBadRequest, "MCP tools are disabled", errors.New("mcp tools disabled")
@@ -611,10 +667,8 @@ func prepareAdvancedChatAssistantRun(ctx context.Context, userID uint, input adv
 			return preparedAdvancedChatAssistantRun{}, http.StatusBadRequest, err.Error(), err
 		}
 	}
-	if connectorDevice != nil {
-		if loaded, loadErr := loadAdvancedChatAgentGroupsForRun(ctx, userID, connectorDevice); loadErr == nil {
-			agentGroups = loaded
-		}
+	if loaded, loadErr := loadAdvancedChatAgentGroupsForRun(ctx, userID, connectorDevice); loadErr == nil {
+		agentGroups = loaded
 	}
 	if mode == advancedChatModeAgentGroup {
 		group, target, status, message, groupErr := prepareAdvancedChatAgentGroupTarget(input.AgentGroupID, agentGroups, messages)
@@ -631,14 +685,20 @@ func prepareAdvancedChatAssistantRun(ctx context.Context, userID uint, input adv
 			}
 			return preparedAdvancedChatAssistantRun{}, http.StatusInternalServerError, "Failed to load group agent", err
 		}
-		skills, err = loadAdvancedChatSkills(userID, target.SkillIDs)
+		skillIDs := []string{}
+		mcpServerIDs := []string{}
+		if agent != nil {
+			skillIDs = uniqueStringsLocal(decodeStringList(agent.SkillIDs))
+			mcpServerIDs = uniqueStringsLocal(decodeStringList(agent.MCPServerIDs))
+		}
+		skills, err = loadAdvancedChatSkills(userID, skillIDs)
 		if err != nil {
 			return preparedAdvancedChatAssistantRun{}, http.StatusInternalServerError, "Failed to load group agent skills", err
 		}
-		if len(skills) != len(uniqueStringsLocal(target.SkillIDs)) {
+		if len(skills) != len(uniqueStringsLocal(skillIDs)) {
 			return preparedAdvancedChatAssistantRun{}, http.StatusBadRequest, "Unknown group agent skill", errors.New("unknown group agent skill")
 		}
-		serverIDs := uniqueStringsLocal(append([]string{}, target.MCPServerIDs...))
+		serverIDs := uniqueStringsLocal(append([]string{}, mcpServerIDs...))
 		serverIDs = uniqueStringsLocal(append(serverIDs, skillMCPIDs(skills)...))
 		if len(serverIDs) > 0 && !advancedChatAssistantMCPToolsEnabled() {
 			return preparedAdvancedChatAssistantRun{}, http.StatusBadRequest, "MCP tools are disabled", errors.New("mcp tools disabled")
@@ -698,7 +758,7 @@ func prepareAdvancedChatAgentGroupTarget(groupID string, groups []advancedChatAg
 		}
 	}
 	if !found {
-		return group, advancedChatGroupAgent{}, http.StatusBadRequest, "Agent group not found on connector", errors.New("agent group not found")
+		return group, advancedChatGroupAgent{}, http.StatusBadRequest, "Studio not found", errors.New("studio not found")
 	}
 	chiefs := []advancedChatGroupAgent{}
 	for _, agent := range group.Agents {
@@ -707,7 +767,7 @@ func prepareAdvancedChatAgentGroupTarget(groupID string, groups []advancedChatAg
 		}
 	}
 	if len(chiefs) != 1 {
-		return group, advancedChatGroupAgent{}, http.StatusBadRequest, "Agent group must contain exactly one chief", errors.New("agent group chief count invalid")
+		return group, advancedChatGroupAgent{}, http.StatusBadRequest, "Studio must contain exactly one chief", errors.New("studio chief count invalid")
 	}
 	target := chiefs[0]
 	if agent, ok := findAdvancedChatMentionedGroupAgentInMessages(group, messages); ok {
@@ -716,7 +776,7 @@ func prepareAdvancedChatAgentGroupTarget(groupID string, groups []advancedChatAg
 		return group, advancedChatGroupAgent{}, http.StatusBadRequest, "Mentioned agent was not found in the selected group", errors.New("mentioned agent not found")
 	}
 	if strings.TrimSpace(target.ChatAgentID) == "" {
-		return group, target, http.StatusBadRequest, "Group agent must select a chat agent", errors.New("group agent chat agent required")
+		return group, target, http.StatusBadRequest, "Studio member must select an agent", errors.New("studio member agent required")
 	}
 	return group, target, http.StatusOK, "", nil
 }
@@ -779,15 +839,21 @@ func saveAdvancedChatSessionSnapshot(userID uint, sessionID string, input advanc
 	reasoningEffort := normalizeAdvancedChatReasoningEffort(input.ReasoningEffort)
 	agentID := strings.TrimSpace(input.AgentID)
 	agentGroupID := strings.TrimSpace(input.AgentGroupID)
+	var agent *AdvancedChatAgent
 	if agentID != "" {
-		if _, err := loadAdvancedChatAgent(userID, agentID); err != nil {
+		loadedAgent, err := loadAdvancedChatAgent(userID, agentID)
+		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return advancedChatSessionResponse{}, http.StatusBadRequest, "Agent not found", err
 			}
 			return advancedChatSessionResponse{}, http.StatusInternalServerError, "Failed to load agent", err
 		}
+		agent = loadedAgent
 	}
 	skillIDs := uniqueStringsLocal(input.SkillIDs)
+	if agent != nil {
+		skillIDs = uniqueStringsLocal(append(decodeStringList(agent.SkillIDs), skillIDs...))
+	}
 	skills := []AdvancedChatSkill{}
 	if len(skillIDs) > 0 {
 		var err error
@@ -800,6 +866,9 @@ func saveAdvancedChatSessionSnapshot(userID uint, sessionID string, input advanc
 		}
 	}
 	mcpServerIDs := uniqueStringsLocal(input.MCPServerIDs)
+	if agent != nil {
+		mcpServerIDs = uniqueStringsLocal(append(decodeStringList(agent.MCPServerIDs), mcpServerIDs...))
+	}
 	if (runMode == advancedChatModeAssistant || runMode == advancedChatModeAgentGroup) && !advancedChatAssistantMCPToolsEnabled() && (len(mcpServerIDs) > 0 || len(skillMCPIDs(skills)) > 0) {
 		return advancedChatSessionResponse{}, http.StatusBadRequest, "MCP tools are disabled", errors.New("mcp tools disabled")
 	}
@@ -812,8 +881,8 @@ func saveAdvancedChatSessionSnapshot(userID uint, sessionID string, input advanc
 	commandPrefixesJSON, _ := json.Marshal(commandPrefixes)
 	connectorDeviceID := strings.TrimSpace(input.ConnectorDeviceID)
 	connectorWorkspacePath := strings.TrimSpace(input.ConnectorWorkspacePath)
-	if runMode == advancedChatModeAgentGroup && (connectorDeviceID == "" || agentGroupID == "") {
-		return advancedChatSessionResponse{}, http.StatusBadRequest, "Agent group mode requires connector device and agent group", errors.New("agent group mode requires connector device and agent group")
+	if runMode == advancedChatModeAgentGroup && agentGroupID == "" {
+		return advancedChatSessionResponse{}, http.StatusBadRequest, "Studio is required", errors.New("studio required")
 	}
 	if (connectorDeviceID != "" || connectorWorkspacePath != "") && (runMode == advancedChatModeAssistant || runMode == advancedChatModeAgentGroup) && !advancedChatAssistantConnectorToolsEnabled() {
 		return advancedChatSessionResponse{}, http.StatusBadRequest, "Workspace tools are disabled", errors.New("workspace tools disabled")
@@ -1234,7 +1303,17 @@ func runAdvancedChatAssistantCompletion(runID string, userID uint, prepared prep
 		},
 	}
 
-	response, err := executePreparedAdvancedChatCompletion(ctx, &user, prepared, observer, true)
+	var response *advancedChatCompletionResponse
+	var err error
+	if prepared.groupAgent != nil && advancedChatAgentStudioCanUseExecutionTools(prepared.groupAgent.Type) {
+		_, err = withAdvancedChatAgentStudioLock(user.ID, prepared.input.AgentGroupID, prepared.groupAgent.ID, func() (string, error) {
+			var runErr error
+			response, runErr = executePreparedAdvancedChatCompletion(ctx, &user, prepared, observer, true)
+			return "", runErr
+		})
+	} else {
+		response, err = executePreparedAdvancedChatCompletion(ctx, &user, prepared, observer, true)
+	}
 	if err != nil {
 		if errors.Is(err, errAdvancedChatRunCancelled) || errors.Is(err, context.Canceled) {
 			return
@@ -1255,22 +1334,46 @@ func executePreparedAdvancedChatCompletion(ctx context.Context, user *model.User
 	tools := []ChatExecutorTool{}
 	mcpTools := []ChatExecutorTool{}
 	bindings := map[string]mcpToolBinding{}
+	studioRole := advancedChatAgentStudioRole(prepared)
+	studioRoleActive := prepared.groupAgent != nil
+	studioCanExecute := !studioRoleActive || advancedChatAgentStudioCanUseExecutionTools(studioRole)
+	studioCanSplit := !studioRoleActive || advancedChatAgentStudioCanSplit(studioRole)
+	studioCanDelegate := advancedChatAgentStudioCanDelegate(studioRole, studioRoleActive)
+	studioCanCommit := studioRoleActive && normalizeAdvancedChatAgentType(studioRole) == "reviewer"
 	if advancedChatAssistantMCPToolsEnabled() {
 		var err error
 		mcpTools, bindings, err = listAdvancedChatMCPTools(ctx, prepared.servers)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to load MCP tools: %w", err)
 		}
-		tools = append(tools, mcpTools...)
+		if studioCanExecute {
+			tools = append(tools, mcpTools...)
+		} else {
+			mcpTools = nil
+			bindings = map[string]mcpToolBinding{}
+		}
 	}
-	connectorTools, connectorBindings := advancedChatConnectorTools(prepared.connectorDevice, prepared.connectorWorkspace, prepared.connectorAutoApprove, prepared.connectorCommandPrefixes)
+	allConnectorTools, allConnectorBindings := advancedChatConnectorTools(prepared.connectorDevice, prepared.connectorWorkspace, prepared.connectorAutoApprove, prepared.connectorCommandPrefixes)
+	connectorTools := allConnectorTools
+	connectorBindings := allConnectorBindings
+	if studioRoleActive {
+		connectorTools, connectorBindings = filterAdvancedChatAgentStudioConnectorTools(studioRole, allConnectorTools, allConnectorBindings)
+	}
 	if len(connectorTools) > 0 {
 		tools = append(tools, connectorTools...)
 	}
-	if len(prepared.agentGroups) > 0 {
+	if len(prepared.agentGroups) > 0 && studioCanDelegate {
 		tools = append(tools, advancedChatAgentDelegateTool(prepared.agentGroups))
 	}
-	tools = append(tools, advancedChatAgentSplitTool())
+	if studioCanSplit {
+		tools = append(tools, advancedChatAgentSplitTool())
+	}
+	if studioRoleActive {
+		tools = append(tools, advancedChatAgentStudioInterruptTool())
+	}
+	if studioCanCommit && len(connectorTools) > 0 {
+		tools = append(tools, advancedChatAgentStudioCommitDeltaTool())
+	}
 	deliveryToolName := ""
 	if prepared.delivery != nil {
 		deliveryToolName = "deliver_result"
@@ -1291,14 +1394,25 @@ func executePreparedAdvancedChatCompletion(ctx context.Context, user *model.User
 			systemPrompt = strings.Join([]string{systemPrompt, agentGroupPrompt}, "\n\n")
 		}
 	}
-	if splitPrompt := advancedChatAgentSplitSystemPrompt(); splitPrompt != "" {
-		if strings.TrimSpace(systemPrompt) == "" {
-			systemPrompt = splitPrompt
-		} else {
-			systemPrompt = strings.Join([]string{systemPrompt, splitPrompt}, "\n\n")
+	if studioRoleActive {
+		if studioPrompt := advancedChatAgentStudioPrompt(studioRole, prepared.connectorDevice != nil); studioPrompt != "" {
+			if strings.TrimSpace(systemPrompt) == "" {
+				systemPrompt = studioPrompt
+			} else {
+				systemPrompt = strings.Join([]string{systemPrompt, studioPrompt}, "\n\n")
+			}
 		}
 	}
-	if connectorPrompt := advancedChatConnectorSystemPrompt(prepared.connectorDevice, prepared.connectorWorkspace); connectorPrompt != "" {
+	if studioCanSplit {
+		if splitPrompt := advancedChatAgentSplitSystemPrompt(); splitPrompt != "" {
+			if strings.TrimSpace(systemPrompt) == "" {
+				systemPrompt = splitPrompt
+			} else {
+				systemPrompt = strings.Join([]string{systemPrompt, splitPrompt}, "\n\n")
+			}
+		}
+	}
+	if connectorPrompt := advancedChatAgentStudioConnectorSystemPrompt(studioRole, prepared.connectorDevice, prepared.connectorWorkspace); connectorPrompt != "" && len(connectorTools) > 0 {
 		if strings.TrimSpace(systemPrompt) == "" {
 			systemPrompt = connectorPrompt
 		} else {
@@ -1385,8 +1499,10 @@ func executePreparedAdvancedChatCompletion(ctx context.Context, user *model.User
 			binding, exists := bindings[toolCall.Name]
 			connectorBinding, connectorExists := connectorBindings[toolCall.Name]
 			deliveryExists := prepared.delivery != nil && toolCall.Name == deliveryToolName
-			agentDelegateExists := toolCall.Name == advancedChatAgentDelegateToolName && len(prepared.agentGroups) > 0
-			agentSplitExists := toolCall.Name == advancedChatAgentSplitToolName
+			agentDelegateExists := toolCall.Name == advancedChatAgentDelegateToolName && len(prepared.agentGroups) > 0 && studioCanDelegate
+			agentSplitExists := toolCall.Name == advancedChatAgentSplitToolName && studioCanSplit
+			commitDeltaExists := toolCall.Name == advancedChatAgentStudioCommitDeltaToolName && studioCanCommit
+			interruptExists := toolCall.Name == advancedChatAgentStudioInterruptToolName && studioRoleActive
 			detail := advancedChatCompletionToolCall{ID: toolCall.ID, Round: round + 1, Name: toolCall.Name, Status: "running"}
 			precreatedConnectorTaskID := ""
 			var precreateConnectorTaskErr error
@@ -1400,11 +1516,17 @@ func executePreparedAdvancedChatCompletion(ctx context.Context, user *model.User
 				detail.Server = "result delivery"
 				detail.Tool = "deliver_result"
 			} else if agentDelegateExists {
-				detail.Server = "agent group"
+				detail.Server = "Agent Studio"
 				detail.Tool = "agent_delegate"
 			} else if agentSplitExists {
 				detail.Server = "agent split"
 				detail.Tool = "agent_split"
+			} else if commitDeltaExists {
+				detail.Server = "agent studio"
+				detail.Tool = "workspace_commit_delta"
+			} else if interruptExists {
+				detail.Server = "agent studio"
+				detail.Tool = "interrupt_sub_agents"
 			}
 			arguments, argumentsErr := parseToolArguments(toolCall.Arguments)
 			if argumentsErr == nil {
@@ -1415,18 +1537,14 @@ func executePreparedAdvancedChatCompletion(ctx context.Context, user *model.User
 				detail.Arguments = arguments
 			}
 			if connectorExists && argumentsErr == nil && advancedChatConnectorTaskRequiresApproval(connectorBinding, arguments) {
-				if connectorBinding.Action == "run_command" {
-					task, err := createAdvancedChatConnectorTask(user.ID, prepared.runID, connectorBinding, arguments)
-					if err != nil {
-						precreateConnectorTaskErr = err
-						detail.Status = "error"
-					} else {
-						precreatedConnectorTaskID = task.ID
-						arguments = advancedChatConnectorArgumentsWithTaskID(arguments, task.ID)
-						detail.Arguments = arguments
-						detail.Status = "approval_required"
-					}
+				task, err := createAdvancedChatConnectorTask(user.ID, prepared.runID, connectorBinding, arguments)
+				if err != nil {
+					precreateConnectorTaskErr = err
+					detail.Status = "error"
 				} else {
+					precreatedConnectorTaskID = task.ID
+					arguments = advancedChatConnectorArgumentsWithTaskID(arguments, task.ID)
+					detail.Arguments = arguments
 					detail.Status = "approval_required"
 				}
 			}
@@ -1501,7 +1619,7 @@ func executePreparedAdvancedChatCompletion(ctx context.Context, user *model.User
 					}
 				}
 			} else if agentDelegateExists {
-				detail.Server = "agent group"
+				detail.Server = "Agent Studio"
 				detail.Tool = "agent_delegate"
 				if argumentsErr != nil {
 					detail.Status = "invalid_arguments"
@@ -1518,10 +1636,11 @@ func executePreparedAdvancedChatCompletion(ctx context.Context, user *model.User
 						WorkspaceSkills:    prepared.workspaceSkills,
 						ConnectorDevice:    prepared.connectorDevice,
 						ConnectorWorkspace: prepared.connectorWorkspace,
-						ConnectorBindings:  connectorBindings,
-						ConnectorTools:     connectorTools,
+						ConnectorBindings:  allConnectorBindings,
+						ConnectorTools:     allConnectorTools,
 						Groups:             prepared.agentGroups,
 						CallerAgentName:    preparedGroupAgentName(prepared.groupAgent),
+						Observer:           observer,
 						Arguments:          arguments,
 					})
 					if err != nil {
@@ -1551,11 +1670,54 @@ func executePreparedAdvancedChatCompletion(ctx context.Context, user *model.User
 						Tools:             splitTools,
 						MCPBindings:       bindings,
 						ConnectorBindings: connectorBindings,
+						Observer:          observer,
 						Arguments:         arguments,
 					})
 					if err != nil {
 						detail.Status = "error"
 						toolResultText = "Split agent failed: " + err.Error()
+					} else {
+						detail.Status = "ok"
+					}
+				}
+			} else if commitDeltaExists {
+				detail.Server = "agent studio"
+				detail.Tool = "workspace_commit_delta"
+				if argumentsErr != nil {
+					detail.Status = "invalid_arguments"
+					toolResultText = "Invalid delta commit arguments: " + argumentsErr.Error()
+				} else if len(connectorBindings) == 0 {
+					detail.Status = "error"
+					toolResultText = "No connector workspace is available for commit."
+				} else {
+					var commitBinding advancedChatConnectorToolBinding
+					for _, binding := range connectorBindings {
+						commitBinding = binding
+						break
+					}
+					toolResultText, err = commitAdvancedChatAgentStudioDelta(ctx, user.ID, prepared.runID, commitBinding, arguments)
+					if err != nil {
+						detail.Status = "error"
+						if strings.TrimSpace(toolResultText) != "" {
+							toolResultText = strings.TrimSpace(toolResultText) + "\n\nDelta commit failed: " + err.Error()
+						} else {
+							toolResultText = "Delta commit failed: " + err.Error()
+						}
+					} else {
+						detail.Status = "ok"
+					}
+				}
+			} else if interruptExists {
+				detail.Server = "agent studio"
+				detail.Tool = "interrupt_sub_agents"
+				if argumentsErr != nil {
+					detail.Status = "invalid_arguments"
+					toolResultText = "Invalid sub-agent interrupt arguments: " + argumentsErr.Error()
+				} else {
+					toolResultText, err = interruptAdvancedChatAgentStudioSubAgents(prepared.runID, prepared.input.SessionID, user.ID, arguments)
+					if err != nil {
+						detail.Status = "error"
+						toolResultText = "Sub-agent interrupt failed: " + err.Error()
 					} else {
 						detail.Status = "ok"
 					}
@@ -1660,12 +1822,31 @@ func advancedChatModelRetryDelay(attempt int) time.Duration {
 }
 
 func finishAdvancedChatRun(runID string, sessionID string, userID uint, assistantMessageID string, response *advancedChatCompletionResponse) {
+	if response == nil {
+		return
+	}
 	content := strings.TrimSpace(response.Message.Content)
 	contentParts, _ := json.Marshal(normalizeAdvancedChatContentParts(response.Message.Parts, content))
-	toolDetailsJSON, _ := json.Marshal(response.ToolCallDetails)
 	now := time.Now()
 	finished := false
+	lockKey := fmt.Sprintf("%d:%s", userID, strings.TrimSpace(runID))
+	value, _ := advancedChatRunEventLocks.LoadOrStore(lockKey, &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	mutex.Lock()
 	_ = model.DB.Transaction(func(tx *gorm.DB) error {
+		var currentRun AdvancedChatRun
+		if err := tx.Where("id = ? AND user_id = ?", runID, userID).First(&currentRun).Error; err != nil {
+			return err
+		}
+		toolCallDetails := mergeAdvancedChatToolCallDetailList(decodeAdvancedChatToolCalls(currentRun.ToolCallDetails), response.ToolCallDetails)
+		toolCallCount := len(toolCallDetails)
+		if toolCallCount == 0 {
+			toolCallCount = response.ToolCalls
+		}
+		toolDetailsJSON, err := json.Marshal(toolCallDetails)
+		if err != nil {
+			return err
+		}
 		update := tx.Model(&AdvancedChatRun{}).
 			Where("id = ? AND user_id = ? AND status IN ?", runID, userID, []string{advancedChatRunStatusQueued, advancedChatRunStatusRunning}).
 			Updates(map[string]interface{}{
@@ -1673,7 +1854,7 @@ func finishAdvancedChatRun(runID string, sessionID string, userID uint, assistan
 				"status_message":    "completed",
 				"error_message":     "",
 				"cost":              response.Cost,
-				"tool_calls":        response.ToolCalls,
+				"tool_calls":        toolCallCount,
 				"tool_call_details": string(toolDetailsJSON),
 				"finished_at":       &now,
 			})
@@ -1685,9 +1866,12 @@ func finishAdvancedChatRun(runID string, sessionID string, userID uint, assistan
 			Updates(map[string]interface{}{"content": content, "content_parts": string(contentParts), "tool_calls": string(toolDetailsJSON)}).Error; err != nil {
 			return err
 		}
+		response.ToolCallDetails = toolCallDetails
+		response.ToolCalls = toolCallCount
 		finished = true
 		return nil
 	})
+	mutex.Unlock()
 	if finished {
 		_ = appendAdvancedChatRunEvent(runID, sessionID, userID, "done", response)
 	}
@@ -1916,6 +2100,11 @@ func mergeAdvancedChatMessageToolCall(messageID string, userID uint, detail adva
 }
 
 func mergeAdvancedChatRunToolCall(runID string, userID uint, assistantMessageID string, detail advancedChatCompletionToolCall) error {
+	lockKey := fmt.Sprintf("%d:%s", userID, strings.TrimSpace(runID))
+	value, _ := advancedChatRunEventLocks.LoadOrStore(lockKey, &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	mutex.Lock()
+	defer mutex.Unlock()
 	return model.DB.Transaction(func(tx *gorm.DB) error {
 		var run AdvancedChatRun
 		if err := tx.Where("id = ? AND user_id = ?", runID, userID).First(&run).Error; err != nil {
@@ -1953,11 +2142,84 @@ func mergeAdvancedChatToolCallDetails(current []advancedChatCompletionToolCall, 
 	return append(current, next)
 }
 
+func mergeAdvancedChatToolCallDetailList(current []advancedChatCompletionToolCall, next []advancedChatCompletionToolCall) []advancedChatCompletionToolCall {
+	result := append([]advancedChatCompletionToolCall{}, current...)
+	for _, detail := range next {
+		result = mergeAdvancedChatToolCallDetails(result, detail)
+	}
+	return result
+}
+
+func cancelActiveAdvancedChatToolCalls(details []advancedChatCompletionToolCall, result string) ([]advancedChatCompletionToolCall, bool) {
+	changed := false
+	result = truncateToolResult(strings.TrimSpace(result))
+	for index := range details {
+		switch strings.ToLower(strings.TrimSpace(details[index].Status)) {
+		case "running", "approval_required":
+			details[index].Status = "error"
+			if result != "" {
+				details[index].Result = result
+			}
+			changed = true
+		}
+	}
+	return details, changed
+}
+
+func cancelRunningAdvancedChatAgentTasks(runID string, sessionID string, userID uint) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return
+	}
+	type taskState struct {
+		status string
+	}
+	var events []AdvancedChatRunEvent
+	if err := model.DB.
+		Where("run_id = ? AND user_id = ? AND event = ?", runID, userID, "agent_task").
+		Order("seq ASC").
+		Find(&events).Error; err != nil {
+		return
+	}
+	states := map[string]taskState{}
+	order := []string{}
+	for _, event := range events {
+		payload := map[string]interface{}{}
+		if strings.TrimSpace(event.Payload) != "" {
+			_ = json.Unmarshal([]byte(event.Payload), &payload)
+		}
+		taskID := strings.TrimSpace(stringFromMap(payload, "task_id"))
+		if taskID == "" {
+			continue
+		}
+		if _, exists := states[taskID]; !exists {
+			order = append(order, taskID)
+		}
+		states[taskID] = taskState{status: strings.ToLower(strings.TrimSpace(stringFromMap(payload, "status")))}
+	}
+	for _, taskID := range order {
+		state := states[taskID]
+		if state.status != "" && state.status != "running" && state.status != "approval_required" {
+			continue
+		}
+		appendAdvancedChatAgentTaskEvent(runID, sessionID, userID, gin.H{
+			"task_id": taskID,
+			"status":  "error",
+			"error":   "cancelled by user",
+		})
+	}
+}
+
 func appendAdvancedChatRunEvent(runID string, sessionID string, userID uint, event string, payload interface{}) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
+	lockKey := fmt.Sprintf("%d:%s", userID, strings.TrimSpace(runID))
+	value, _ := advancedChatRunEventLocks.LoadOrStore(lockKey, &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	mutex.Lock()
+	defer mutex.Unlock()
 	var maxSeq int
 	if err := model.DB.Model(&AdvancedChatRunEvent{}).
 		Where("run_id = ? AND user_id = ?", runID, userID).

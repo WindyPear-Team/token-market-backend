@@ -18,28 +18,17 @@ import (
 )
 
 const (
-	advancedChatAgentGroupActionList   = "list_agent_groups"
-	advancedChatAgentGroupActionRead   = "read_agent_group"
-	advancedChatAgentGroupActionWrite  = "write_agent_group"
-	advancedChatAgentGroupActionDelete = "delete_agent_group"
-
 	advancedChatAgentDelegateToolName = "agent_delegate"
 	advancedChatAgentSplitToolName    = "agent_split"
-	advancedChatAgentGroupsLoadWait   = 20 * time.Second
 )
 
 var advancedChatAgentGroupIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,80}$`)
 
 type advancedChatAgentGroupInput struct {
-	ConnectorDeviceID string                   `json:"connector_device_id"`
-	ID                string                   `json:"id"`
-	Name              string                   `json:"name"`
-	Description       string                   `json:"description"`
-	Agents            []advancedChatGroupAgent `json:"agents"`
-}
-
-type advancedChatAgentGroupDeleteInput struct {
-	ConnectorDeviceID string `json:"connector_device_id"`
+	ID          string                   `json:"id"`
+	Name        string                   `json:"name"`
+	Description string                   `json:"description"`
+	Agents      []advancedChatGroupAgent `json:"agents"`
 }
 
 type advancedChatAgentGroup struct {
@@ -68,13 +57,9 @@ func (api *advancedChatAPI) listAgentGroups(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
-	device, ok := api.loadAgentGroupConnector(c, user.ID, c.Query("connector_device_id"))
-	if !ok {
-		return
-	}
-	groups, err := loadAdvancedChatAgentGroupsForRun(c.Request.Context(), user.ID, device)
+	groups, err := loadAdvancedChatAgentGroupsForRun(c.Request.Context(), user.ID, nil)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"groups": groups})
@@ -86,13 +71,13 @@ func (api *advancedChatAPI) getAgentGroup(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
-	device, ok := api.loadAgentGroupConnector(c, user.ID, c.Query("connector_device_id"))
-	if !ok {
-		return
-	}
-	group, err := readAdvancedChatAgentGroup(c.Request.Context(), user.ID, device, c.Param("id"))
+	group, err := readAdvancedChatAgentGroup(c.Request.Context(), user.ID, nil, c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Studio not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, group)
@@ -113,24 +98,20 @@ func (api *advancedChatAPI) saveAgentGroup(c *gin.Context) {
 	bodyID := strings.TrimSpace(input.ID)
 	if pathID != "" {
 		if bodyID != "" && bodyID != pathID {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "agent group id does not match path"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "studio id does not match path"})
 			return
 		}
 		input.ID = pathID
 	} else if bodyID != "" {
 		input.ID = bodyID
 	}
-	device, ok := api.loadAgentGroupConnector(c, user.ID, input.ConnectorDeviceID)
-	if !ok {
-		return
-	}
 	group, err := normalizeAdvancedChatAgentGroup(input)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := writeAdvancedChatAgentGroup(c.Request.Context(), user.ID, device, group); err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+	if err := writeAdvancedChatAgentGroup(c.Request.Context(), user.ID, nil, group); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, group)
@@ -142,103 +123,86 @@ func (api *advancedChatAPI) deleteAgentGroup(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
-	deviceID := c.Query("connector_device_id")
-	if strings.TrimSpace(deviceID) == "" {
-		var input advancedChatAgentGroupDeleteInput
-		_ = c.ShouldBindJSON(&input)
-		deviceID = input.ConnectorDeviceID
-	}
-	device, ok := api.loadAgentGroupConnector(c, user.ID, deviceID)
-	if !ok {
+	if err := deleteAdvancedChatAgentGroup(c.Request.Context(), user.ID, nil, c.Param("id")); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if err := deleteAdvancedChatAgentGroup(c.Request.Context(), user.ID, device, c.Param("id")); err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": "Agent group deleted"})
-}
-
-func (api *advancedChatAPI) loadAgentGroupConnector(c *gin.Context, userID uint, deviceID string) (*AdvancedChatConnectorDevice, bool) {
-	device, err := loadAdvancedChatConnectorDeviceOnly(userID, deviceID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Connector device not found"})
-			return nil, false
-		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return nil, false
-	}
-	return device, true
-}
-
-func loadAdvancedChatConnectorDeviceOnly(userID uint, deviceID string) (*AdvancedChatConnectorDevice, error) {
-	deviceID = strings.TrimSpace(deviceID)
-	if deviceID == "" {
-		return nil, errors.New("connector device is required")
-	}
-	var device AdvancedChatConnectorDevice
-	if err := model.DB.Where("id = ? AND user_id = ?", deviceID, userID).First(&device).Error; err != nil {
-		return nil, err
-	}
-	if !advancedChatConnectorDeviceOnline(device) {
-		return nil, errors.New("connector device is offline")
-	}
-	return &device, nil
+	c.JSON(http.StatusOK, gin.H{"message": "Studio deleted"})
 }
 
 func loadAdvancedChatAgentGroupsForRun(ctx context.Context, userID uint, device *AdvancedChatConnectorDevice) ([]advancedChatAgentGroup, error) {
-	if device == nil {
-		return []advancedChatAgentGroup{}, nil
-	}
-	loadCtx, cancel := context.WithTimeout(ctx, advancedChatAgentGroupsLoadWait)
-	defer cancel()
-	raw, err := callAdvancedChatAgentGroupConnector(loadCtx, userID, device, advancedChatAgentGroupActionList, map[string]interface{}{})
+	var records []AdvancedChatAgentStudio
+	err := model.DB.WithContext(ctx).Where("user_id = ?", userID).Order("name ASC").Find(&records).Error
 	if err != nil {
-		return nil, fmt.Errorf("failed to load connector agent groups: %w", err)
+		return nil, fmt.Errorf("failed to load studios: %w", err)
 	}
-	return parseAdvancedChatAgentGroups(raw)
+	groups := make([]advancedChatAgentGroup, 0, len(records))
+	for _, record := range records {
+		group, err := advancedChatAgentGroupFromRecord(record)
+		if err == nil && group.ID != "" {
+			groups = append(groups, group)
+		}
+	}
+	return groups, nil
 }
 
 func readAdvancedChatAgentGroup(ctx context.Context, userID uint, device *AdvancedChatConnectorDevice, id string) (advancedChatAgentGroup, error) {
-	raw, err := callAdvancedChatAgentGroupConnector(ctx, userID, device, advancedChatAgentGroupActionRead, map[string]interface{}{"id": strings.TrimSpace(id)})
-	if err != nil {
+	var record AdvancedChatAgentStudio
+	if err := model.DB.WithContext(ctx).Where("user_id = ? AND studio_id = ?", userID, strings.TrimSpace(id)).First(&record).Error; err != nil {
 		return advancedChatAgentGroup{}, err
 	}
-	group, err := parseAdvancedChatAgentGroup(raw)
-	if err != nil {
-		return advancedChatAgentGroup{}, err
-	}
-	return group, nil
+	return advancedChatAgentGroupFromRecord(record)
 }
 
 func writeAdvancedChatAgentGroup(ctx context.Context, userID uint, device *AdvancedChatConnectorDevice, group advancedChatAgentGroup) error {
-	data, err := json.Marshal(group)
+	agents, err := json.Marshal(group.Agents)
 	if err != nil {
 		return err
 	}
-	_, err = callAdvancedChatAgentGroupConnector(ctx, userID, device, advancedChatAgentGroupActionWrite, map[string]interface{}{
-		"id":      group.ID,
-		"content": string(data),
-	})
-	return err
+	var record AdvancedChatAgentStudio
+	err = model.DB.WithContext(ctx).Where("user_id = ? AND studio_id = ?", userID, group.ID).First(&record).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		record = AdvancedChatAgentStudio{
+			UserID:      userID,
+			StudioID:    group.ID,
+			Name:        group.Name,
+			Description: group.Description,
+			Agents:      string(agents),
+		}
+		return model.DB.WithContext(ctx).Create(&record).Error
+	}
+	if err != nil {
+		return err
+	}
+	return model.DB.WithContext(ctx).Model(&record).Updates(map[string]interface{}{
+		"name":        group.Name,
+		"description": group.Description,
+		"agents":      string(agents),
+	}).Error
 }
 
 func deleteAdvancedChatAgentGroup(ctx context.Context, userID uint, device *AdvancedChatConnectorDevice, id string) error {
-	_, err := callAdvancedChatAgentGroupConnector(ctx, userID, device, advancedChatAgentGroupActionDelete, map[string]interface{}{"id": strings.TrimSpace(id)})
-	return err
+	return model.DB.WithContext(ctx).Where("user_id = ? AND studio_id = ?", userID, strings.TrimSpace(id)).Delete(&AdvancedChatAgentStudio{}).Error
 }
 
-func callAdvancedChatAgentGroupConnector(ctx context.Context, userID uint, device *AdvancedChatConnectorDevice, action string, arguments map[string]interface{}) (string, error) {
-	if device == nil {
-		return "", errors.New("connector device is required")
+func advancedChatAgentGroupFromRecord(record AdvancedChatAgentStudio) (advancedChatAgentGroup, error) {
+	agents := []advancedChatGroupAgent{}
+	if strings.TrimSpace(record.Agents) != "" {
+		if err := json.Unmarshal([]byte(record.Agents), &agents); err != nil {
+			return advancedChatAgentGroup{}, err
+		}
 	}
-	binding := advancedChatConnectorToolBinding{
-		DeviceID:   device.ID,
-		DeviceName: device.Name,
-		Action:     action,
+	group, err := normalizeAdvancedChatAgentGroup(advancedChatAgentGroupInput{
+		ID:          record.StudioID,
+		Name:        record.Name,
+		Description: record.Description,
+		Agents:      agents,
+	})
+	if err != nil {
+		return advancedChatAgentGroup{}, err
 	}
-	return callAdvancedChatConnectorTool(ctx, userID, "", binding, arguments)
+	group.UpdatedAt = record.UpdatedAt.Format(time.RFC3339)
+	return group, nil
 }
 
 func normalizeAdvancedChatAgentGroup(input advancedChatAgentGroupInput) (advancedChatAgentGroup, error) {
@@ -247,11 +211,11 @@ func normalizeAdvancedChatAgentGroup(input advancedChatAgentGroupInput) (advance
 		id = newAdvancedChatID("agp")
 	}
 	if !advancedChatAgentGroupIDPattern.MatchString(id) {
-		return advancedChatAgentGroup{}, errors.New("agent group id must be 1-80 characters of letters, numbers, underscore, or dash")
+		return advancedChatAgentGroup{}, errors.New("studio id must be 1-80 characters of letters, numbers, underscore, or dash")
 	}
 	name := strings.TrimSpace(input.Name)
 	if name == "" {
-		return advancedChatAgentGroup{}, errors.New("agent group name is required")
+		return advancedChatAgentGroup{}, errors.New("studio name is required")
 	}
 	if len([]rune(name)) > 120 {
 		name = string([]rune(name)[:120])
@@ -262,7 +226,7 @@ func normalizeAdvancedChatAgentGroup(input advancedChatAgentGroupInput) (advance
 	}
 	agents := normalizeAdvancedChatGroupAgents(input.Agents)
 	if len(agents) == 0 {
-		return advancedChatAgentGroup{}, errors.New("agent group requires at least one agent")
+		return advancedChatAgentGroup{}, errors.New("studio requires at least one member")
 	}
 	chiefCount := 0
 	for _, agent := range agents {
@@ -271,7 +235,7 @@ func normalizeAdvancedChatAgentGroup(input advancedChatAgentGroupInput) (advance
 		}
 	}
 	if chiefCount != 1 {
-		return advancedChatAgentGroup{}, errors.New("agent group must contain exactly one chief")
+		return advancedChatAgentGroup{}, errors.New("studio must contain exactly one chief")
 	}
 	return advancedChatAgentGroup{
 		ID:          id,
@@ -285,14 +249,15 @@ func normalizeAdvancedChatGroupAgents(input []advancedChatGroupAgent) []advanced
 	result := []advancedChatGroupAgent{}
 	seen := map[string]struct{}{}
 	for index, agent := range input {
-		id := strings.TrimSpace(agent.ID)
-		if id == "" {
-			id = fmt.Sprintf("agent-%d", index+1)
-		}
-		id = sanitizeAdvancedChatAgentGroupPart(id, fmt.Sprintf("agent-%d", index+1))
-		if _, exists := seen[id]; exists {
+		chatAgentID := truncateAdvancedChatAgentField(agent.ChatAgentID, 80)
+		if chatAgentID == "" {
 			continue
 		}
+		id := strings.TrimSpace(agent.ID)
+		if id == "" {
+			id = "agent-" + chatAgentID
+		}
+		id = uniqueAdvancedChatAgentGroupPart(seen, id, fmt.Sprintf("agent-%d", index+1))
 		name := strings.TrimSpace(agent.Name)
 		if name == "" {
 			name = id
@@ -300,13 +265,7 @@ func normalizeAdvancedChatGroupAgents(input []advancedChatGroupAgent) []advanced
 		if len([]rune(name)) > 120 {
 			name = string([]rune(name)[:120])
 		}
-		chatAgentID := truncateAdvancedChatAgentField(agent.ChatAgentID, 80)
-		skillIDs := uniqueStringsLocal(agent.SkillIDs)
-		mcpServerIDs := uniqueStringsLocal(agent.MCPServerIDs)
 		prompt := strings.TrimSpace(agent.Prompt)
-		if prompt == "" && chatAgentID == "" && len(skillIDs) == 0 && len(mcpServerIDs) == 0 {
-			continue
-		}
 		if len([]rune(prompt)) > 20000 {
 			prompt = string([]rune(prompt)[:20000])
 		}
@@ -318,8 +277,6 @@ func normalizeAdvancedChatGroupAgents(input []advancedChatGroupAgent) []advanced
 			ChatAgentID:   chatAgentID,
 			DefaultModel:  truncateAdvancedChatAgentField(agent.DefaultModel, 100),
 			UserChannelID: agent.UserChannelID,
-			SkillIDs:      skillIDs,
-			MCPServerIDs:  mcpServerIDs,
 		})
 		seen[id] = struct{}{}
 		if len(result) >= 40 {
@@ -327,6 +284,26 @@ func normalizeAdvancedChatGroupAgents(input []advancedChatGroupAgent) []advanced
 		}
 	}
 	return result
+}
+
+func uniqueAdvancedChatAgentGroupPart(seen map[string]struct{}, value string, fallback string) string {
+	base := sanitizeAdvancedChatAgentGroupPart(value, fallback)
+	id := base
+	for i := 2; ; i++ {
+		if _, exists := seen[id]; !exists {
+			return id
+		}
+		suffix := fmt.Sprintf("-%d", i)
+		maxBase := 80 - len(suffix)
+		if maxBase < 1 {
+			maxBase = 1
+		}
+		truncated := base
+		if len(truncated) > maxBase {
+			truncated = truncated[:maxBase]
+		}
+		id = truncated + suffix
+	}
 }
 
 func parseAdvancedChatAgentGroups(raw string) ([]advancedChatAgentGroup, error) {
@@ -406,13 +383,13 @@ func normalizeAdvancedChatAgentType(value string) string {
 func advancedChatAgentTypeSystemPrompt(agentType string) string {
 	switch normalizeAdvancedChatAgentType(agentType) {
 	case "chief":
-		return "Role: chief agent. Coordinate the work, decompose goals, delegate to suitable agents when useful, integrate results, and keep final decisions coherent."
+		return "Role: chief agent. Coordinate the work, decompose goals, delegate to suitable employee agents, integrate results, and keep final decisions coherent. You do not directly edit files, run local commands, or split yourself into sub-agents."
 	case "critic":
-		return "Role: critic agent. Stress-test assumptions, identify flaws, missing evidence, unsafe steps, and weak reasoning. Return concrete corrections and risks."
+		return "Role: critic agent. Stress-test assumptions, identify flaws, missing evidence, unsafe steps, and weak reasoning. You are an employee agent and may use execution tools when the delegated critique requires local evidence."
 	case "reviewer":
-		return "Role: reviewer agent. Review completed work for correctness, regressions, quality, maintainability, and test gaps. Prefer actionable findings over broad summaries."
+		return "Role: reviewer agent. Review completed work for correctness, regressions, quality, maintainability, and test gaps. You are the employee agent responsible for final conflict review and physical commit when MutationLogs are provided."
 	default:
-		return "Role: worker agent. Execute the assigned goal directly, use tools when needed, report concrete results, and avoid taking ownership of unrelated work."
+		return "Role: worker agent. Execute the assigned goal directly, choose fast direct execution for simple work, split into temporary sub-agents for complex work, report concrete results, and avoid taking ownership of unrelated work."
 	}
 }
 
@@ -427,13 +404,13 @@ func truncateAdvancedChatAgentField(value string, max int) string {
 func advancedChatAgentDelegateTool(groups []advancedChatAgentGroup) ChatExecutorTool {
 	return ChatExecutorTool{
 		Name:        advancedChatAgentDelegateToolName,
-		Description: "Delegate a focused goal to an existing agent from the loaded connector agent group. This is CPS-style delegation: the current agent waits until the selected agent returns a result. You may call this tool multiple times in the same assistant turn when several existing agents should work on separate goals.",
+		Description: "Delegate a focused goal to an existing member from the loaded Agent Studio. This is CPS-style delegation: the current agent waits until the selected member returns a result. You may call this tool multiple times in the same assistant turn when several existing members should work on separate goals.",
 		Schema: map[string]interface{}{
 			"type":     "object",
 			"required": []string{"group_id", "agent_id", "goal"},
 			"properties": map[string]interface{}{
-				"group_id": map[string]interface{}{"type": "string", "description": "Agent group id."},
-				"agent_id": map[string]interface{}{"type": "string", "description": "Agent id inside the group. Use an existing agent, not a newly split agent."},
+				"group_id": map[string]interface{}{"type": "string", "description": "Agent Studio id."},
+				"agent_id": map[string]interface{}{"type": "string", "description": "Member id inside the studio. Use an existing member, not a newly split agent."},
 				"goal":     map[string]interface{}{"type": "string", "description": "Specific task goal for the delegated agent."},
 				"context":  map[string]interface{}{"type": "string", "description": "Optional extra context or constraints for this delegated task."},
 			},
@@ -444,7 +421,7 @@ func advancedChatAgentDelegateTool(groups []advancedChatAgentGroup) ChatExecutor
 func advancedChatAgentSplitTool() ChatExecutorTool {
 	return ChatExecutorTool{
 		Name:        advancedChatAgentSplitToolName,
-		Description: "Split the current assistant into one or more temporary sibling agents that share the same conversation history but each receive a different focused goal. This is not CPS delegation to an agent group; use agent_delegate when you need a defined agent from a connector group.",
+		Description: "Split the current assistant into one or more temporary sibling agents that share the same conversation history but each receive a different focused goal. This is not CPS delegation to an Agent Studio member; use agent_delegate when you need a defined studio member.",
 		Schema: map[string]interface{}{
 			"type":     "object",
 			"required": []string{"tasks"},
@@ -474,9 +451,9 @@ func advancedChatAgentGroupSystemPrompt(groups []advancedChatAgentGroup) string 
 		return ""
 	}
 	lines := []string{
-		"Connector agent groups are available for CPS-style delegation.",
-		"Use agent_delegate when a task should be handled by an existing agent in a group. Do not treat CPS delegation as agent splitting; choose one of the defined agents by group_id and agent_id.",
-		"Available agent groups:",
+		"Agent Studios are available for CPS-style delegation.",
+		"Use agent_delegate when a task should be handled by an existing studio member. Do not treat CPS delegation as agent splitting; choose one of the defined members by group_id and agent_id.",
+		"Available Agent Studios:",
 	}
 	for _, group := range groups {
 		lines = append(lines, "- group_id: "+group.ID+"; name: "+group.Name)
@@ -489,7 +466,7 @@ func advancedChatAgentGroupSystemPrompt(groups []advancedChatAgentGroup) string 
 
 func advancedChatAgentSplitSystemPrompt() string {
 	return strings.TrimSpace(`Use agent_split when the current task can be divided into independent temporary sibling-agent tasks that share this conversation history.
-Use agent_delegate instead when you need a specific existing agent from a connector agent group.
+Use agent_delegate instead when you need a specific existing member from an Agent Studio.
 You may call agent_split with several tasks at once. Each split agent returns a result to you; you remain responsible for combining the results and producing the final answer.`)
 }
 
@@ -497,8 +474,8 @@ func advancedChatAgentGroupChatSystemPrompt(group *advancedChatAgentGroup, agent
 	if group == nil || agent == nil {
 		return ""
 	}
-	return strings.TrimSpace("You are participating in an agent group chat.\n" +
-		"Group: " + group.Name + " (" + group.ID + ").\n" +
+	return strings.TrimSpace("You are participating in an Agent Studio chat.\n" +
+		"Studio: " + group.Name + " (" + group.ID + ").\n" +
 		"Your agent identity: " + agent.Name + " (" + agent.ID + "), type: " + normalizeAdvancedChatAgentType(agent.Type) + ".\n" +
 		advancedChatAgentTypeSystemPrompt(agent.Type) + "\n" +
 		"Messages are annotated as coming from the user or from another named agent. Use those annotations to understand who is speaking.\n" +
@@ -521,6 +498,8 @@ type advancedChatAgentDelegateInput struct {
 	ConnectorTools     []ChatExecutorTool
 	Groups             []advancedChatAgentGroup
 	CallerAgentName    string
+	Observer           advancedChatCompletionObserver
+	OnApprovalRequired func(context.Context, MessageChannelConnectorApproval) error
 	Arguments          map[string]interface{}
 }
 
@@ -537,7 +516,10 @@ func executeAdvancedChatAgentDelegate(ctx context.Context, user *model.User, inp
 	}
 	group, agent, ok := findAdvancedChatGroupAgent(input.Groups, groupID, agentID)
 	if !ok {
-		return "", errors.New("agent was not found in connector agent groups")
+		return "", errors.New("member was not found in Agent Studio")
+	}
+	if normalizeAdvancedChatAgentType(agent.Type) == "chief" {
+		return "", errors.New("chief agents cannot be delegated execution tasks")
 	}
 	taskID := newAdvancedChatID("agt")
 	appendAdvancedChatAgentTaskEvent(input.RunID, input.SessionID, user.ID, gin.H{
@@ -561,19 +543,26 @@ func executeAdvancedChatAgentDelegate(ctx context.Context, user *model.User, inp
 		}
 		return "", err
 	}
-	skills, err := loadAdvancedChatSkills(user.ID, agent.SkillIDs)
+	skillIDs := []string{}
+	mcpServerIDs := []string{}
+	if chatAgent != nil {
+		skillIDs = uniqueStringsLocal(decodeStringList(chatAgent.SkillIDs))
+		mcpServerIDs = uniqueStringsLocal(decodeStringList(chatAgent.MCPServerIDs))
+	}
+	skills, err := loadAdvancedChatSkills(user.ID, skillIDs)
 	if err != nil {
 		appendAdvancedChatAgentTaskEvent(input.RunID, input.SessionID, user.ID, gin.H{"task_id": taskID, "status": "error", "error": err.Error()})
 		return "", err
 	}
-	if len(skills) != len(uniqueStringsLocal(agent.SkillIDs)) {
+	if len(skills) != len(uniqueStringsLocal(skillIDs)) {
 		appendAdvancedChatAgentTaskEvent(input.RunID, input.SessionID, user.ID, gin.H{"task_id": taskID, "status": "error", "error": "referenced skill was not found"})
 		return "", errors.New("referenced skill was not found")
 	}
-	serverIDs := uniqueStringsLocal(append(agent.MCPServerIDs, skillMCPIDs(skills)...))
+	serverIDs := uniqueStringsLocal(append(mcpServerIDs, skillMCPIDs(skills)...))
 	servers := []AdvancedChatMCPServer{}
 	if len(serverIDs) > 0 {
 		if !advancedChatAssistantMCPToolsEnabled() {
+			appendAdvancedChatAgentTaskEvent(input.RunID, input.SessionID, user.ID, gin.H{"task_id": taskID, "status": "error", "error": "mcp tools are disabled"})
 			return "", errors.New("mcp tools are disabled")
 		}
 		servers, err = loadAdvancedChatMCPServersForCall(user.ID, serverIDs)
@@ -593,46 +582,68 @@ func executeAdvancedChatAgentDelegate(ctx context.Context, user *model.User, inp
 		appendAdvancedChatAgentTaskEvent(input.RunID, input.SessionID, user.ID, gin.H{"task_id": taskID, "status": "error", "error": "model is required for delegated agent"})
 		return "", errors.New("model is required for delegated agent")
 	}
-	systemParts := []string{
-		"You are running as a delegated CPS agent. Complete only the delegated goal and return a concise result to the caller agent.",
-		"Agent group: " + group.Name + " (" + group.ID + ")",
-		"Agent: " + agent.Name + " (" + agent.ID + "), type: " + agent.Type,
-		advancedChatAgentTypeSystemPrompt(agent.Type),
-	}
-	if prompt := buildAdvancedChatCompletionSystemPrompt(chatAgent, skills, input.WorkspaceSkills, advancedChatModeAssistant); strings.TrimSpace(prompt) != "" {
-		systemParts = append(systemParts, prompt)
-	}
-	if prompt := strings.TrimSpace(agent.Prompt); prompt != "" {
-		systemParts = append(systemParts, prompt)
-	}
-	if prompt := advancedChatConnectorSystemPrompt(input.ConnectorDevice, input.ConnectorWorkspace); strings.TrimSpace(prompt) != "" {
-		systemParts = append(systemParts, prompt)
-	}
-	messages := append([]ChatExecutorMessage{}, input.Messages...)
-	taskText := "Delegated goal:\n" + goal
-	if caller := strings.TrimSpace(input.CallerAgentName); caller != "" {
-		taskText = "Message source: agent " + caller + " via CPS delegation.\n\n" + taskText
-	}
-	if extraContext != "" {
-		taskText += "\n\nAdditional context:\n" + extraContext
-	}
-	messages = append(messages, ChatExecutorMessage{Role: "user", Content: taskText})
 	userChannelID := input.UserChannelID
 	if agent.UserChannelID > 0 {
 		userChannelID = agent.UserChannelID
 	}
-	tools := append([]ChatExecutorTool{}, input.ConnectorTools...)
-	mcpBindings := map[string]mcpToolBinding{}
-	if len(servers) > 0 {
-		mcpTools, bindings, err := listAdvancedChatMCPTools(ctx, servers)
-		if err != nil {
-			appendAdvancedChatAgentTaskEvent(input.RunID, input.SessionID, user.ID, gin.H{"task_id": taskID, "status": "error", "error": err.Error()})
-			return "", fmt.Errorf("failed to load delegated MCP tools: %w", err)
+	result, err := withAdvancedChatAgentStudioLock(user.ID, group.ID, agent.ID, func() (string, error) {
+		systemParts := []string{
+			"You are running as an employee main agent in Agent Studio. Complete only the delegated goal and return a concise result to the caller agent.",
+			"Agent Studio: " + group.Name + " (" + group.ID + ")",
+			"Agent: " + agent.Name + " (" + agent.ID + "), type: " + agent.Type,
+			advancedChatAgentTypeSystemPrompt(agent.Type),
 		}
-		tools = append(mcpTools, tools...)
-		mcpBindings = bindings
-	}
-	result, err := runAdvancedChatDelegatedAgentLoop(ctx, user, modelName, userChannelID, strings.Join(nonEmptyStrings(systemParts), "\n\n"), messages, tools, mcpBindings, input.ConnectorBindings, input.RunID)
+		if prompt := buildAdvancedChatCompletionSystemPrompt(chatAgent, skills, input.WorkspaceSkills, advancedChatModeAssistant); strings.TrimSpace(prompt) != "" {
+			systemParts = append(systemParts, prompt)
+		}
+		if prompt := strings.TrimSpace(agent.Prompt); prompt != "" {
+			systemParts = append(systemParts, prompt)
+		}
+		if prompt := advancedChatConnectorSystemPrompt(input.ConnectorDevice, input.ConnectorWorkspace); strings.TrimSpace(prompt) != "" {
+			systemParts = append(systemParts, prompt)
+		}
+		if prompt := advancedChatAgentStudioPrompt(agent.Type, input.ConnectorDevice != nil); prompt != "" {
+			systemParts = append(systemParts, prompt)
+		}
+		messages := append([]ChatExecutorMessage{}, input.Messages...)
+		taskText := "Delegated goal:\n" + goal
+		if caller := strings.TrimSpace(input.CallerAgentName); caller != "" {
+			taskText = "Message source: agent " + caller + " via CPS delegation.\n\n" + taskText
+		}
+		if extraContext != "" {
+			taskText += "\n\nAdditional context:\n" + extraContext
+		}
+		messages = append(messages, ChatExecutorMessage{Role: "user", Content: taskText})
+		tools := append([]ChatExecutorTool{}, input.ConnectorTools...)
+		mcpBindings := map[string]mcpToolBinding{}
+		if len(servers) > 0 {
+			mcpTools, bindings, err := listAdvancedChatMCPTools(ctx, servers)
+			if err != nil {
+				return "", fmt.Errorf("failed to load delegated MCP tools: %w", err)
+			}
+			tools = append(mcpTools, tools...)
+			mcpBindings = bindings
+		}
+		if advancedChatAgentStudioCanSplit(agent.Type) {
+			tools = append(tools, advancedChatAgentSplitTool(), advancedChatAgentStudioInterruptTool())
+		}
+		if normalizeAdvancedChatAgentType(agent.Type) == "reviewer" && input.ConnectorDevice != nil {
+			tools = append(tools, advancedChatAgentStudioCommitDeltaTool())
+		}
+		return runAdvancedChatDelegatedAgentLoop(ctx, user, modelName, userChannelID, strings.Join(nonEmptyStrings(systemParts), "\n\n"), messages, tools, mcpBindings, input.ConnectorBindings, advancedChatDelegatedAgentLoopOptions{
+			RunID:              input.RunID,
+			SessionID:          input.SessionID,
+			ParentToolCallID:   input.ToolCallID,
+			Observer:           input.Observer,
+			OnApprovalRequired: input.OnApprovalRequired,
+			AllowSplit:         advancedChatAgentStudioCanSplit(agent.Type),
+			AllowCommit:        normalizeAdvancedChatAgentType(agent.Type) == "reviewer",
+			StatusAgentID:      agent.ID,
+			StatusAgentName:    agent.Name,
+			StatusAgentType:    normalizeAdvancedChatAgentType(agent.Type),
+			StatusAgentGroupID: group.ID,
+		})
+	})
 	if err != nil {
 		appendAdvancedChatAgentTaskEvent(input.RunID, input.SessionID, user.ID, gin.H{"task_id": taskID, "status": "error", "error": err.Error(), "result": truncateToolResult(result)})
 		return result, err
@@ -655,7 +666,7 @@ func advancedChatAgentNamePrefix(content string, name string) string {
 	return prefix + " " + content
 }
 
-func runAdvancedChatDelegatedAgentLoop(ctx context.Context, user *model.User, modelName string, userChannelID uint, system string, messages []ChatExecutorMessage, tools []ChatExecutorTool, mcpBindings map[string]mcpToolBinding, connectorBindings map[string]advancedChatConnectorToolBinding, runID string) (string, error) {
+func runAdvancedChatDelegatedAgentLoop(ctx context.Context, user *model.User, modelName string, userChannelID uint, system string, messages []ChatExecutorMessage, tools []ChatExecutorTool, mcpBindings map[string]mcpToolBinding, connectorBindings map[string]advancedChatConnectorToolBinding, options advancedChatDelegatedAgentLoopOptions) (string, error) {
 	executorMessages := append([]ChatExecutorMessage{}, messages...)
 	lastContent := ""
 	for round := 0; round < 6; round++ {
@@ -683,31 +694,173 @@ func runAdvancedChatDelegatedAgentLoop(ctx context.Context, user *model.User, mo
 		for _, call := range result.ToolCalls {
 			mcpBinding, mcpExists := mcpBindings[call.Name]
 			connectorBinding, connectorExists := connectorBindings[call.Name]
+			agentSplitExists := call.Name == advancedChatAgentSplitToolName && options.AllowSplit
+			commitDeltaExists := call.Name == advancedChatAgentStudioCommitDeltaToolName && options.AllowCommit
+			interruptExists := call.Name == advancedChatAgentStudioInterruptToolName
+			detail := advancedChatCompletionToolCall{ID: call.ID, Round: round + 1, Name: call.Name, Status: "running"}
+			precreatedConnectorTaskID := ""
+			var precreateConnectorTaskErr error
+			if mcpExists {
+				detail.Server = mcpBinding.Server.Name
+				detail.Tool = mcpBinding.Tool.Name
+			} else if connectorExists {
+				detail.Server = connectorBinding.DeviceName
+				detail.Tool = connectorBinding.Action
+			} else if agentSplitExists {
+				detail.Server = "agent split"
+				detail.Tool = "agent_split"
+			} else if commitDeltaExists {
+				detail.Server = "agent studio"
+				detail.Tool = "workspace_commit_delta"
+			} else if interruptExists {
+				detail.Server = "agent studio"
+				detail.Tool = "interrupt_sub_agents"
+			}
 			toolResult := "Tool not found for delegated agent: " + call.Name
 			arguments, parseErr := parseToolArguments(call.Arguments)
-			if !mcpExists && !connectorExists {
+			if parseErr == nil {
+				if connectorExists {
+					arguments = advancedChatConnectorToolPreviewArguments(ctx, user.ID, options.RunID, connectorBinding, arguments)
+					arguments = advancedChatConnectorArgumentsWithToolCallID(arguments, call.ID)
+				}
+				detail.Arguments = arguments
+			}
+			if connectorExists && parseErr == nil && advancedChatAgentStudioConnectorTaskRequiresApproval(connectorBinding, arguments, options.DeltaLog) {
+				task, err := createAdvancedChatConnectorTask(user.ID, options.RunID, connectorBinding, arguments)
+				if err != nil {
+					precreateConnectorTaskErr = err
+					detail.Status = "error"
+				} else {
+					precreatedConnectorTaskID = task.ID
+					arguments = advancedChatConnectorArgumentsWithTaskID(arguments, task.ID)
+					detail.Arguments = arguments
+					detail.Status = "approval_required"
+					if options.OnApprovalRequired != nil {
+						approval := MessageChannelConnectorApproval{
+							TaskID:        task.ID,
+							DeviceName:    connectorBinding.DeviceName,
+							Action:        connectorBinding.Action,
+							WorkspacePath: connectorBinding.WorkspacePath,
+							Unrestricted:  strings.TrimSpace(connectorBinding.WorkspacePath) == "",
+							Arguments:     arguments,
+						}
+						if err := options.OnApprovalRequired(ctx, approval); err != nil {
+							return strings.TrimSpace(lastContent), err
+						}
+					}
+				}
+			}
+			if options.Observer.OnToolCall != nil {
+				if err := options.Observer.OnToolCall(detail); err != nil {
+					return strings.TrimSpace(lastContent), err
+				}
+			}
+			detail.Status = "missing"
+			if !mcpExists && !connectorExists && !agentSplitExists && !commitDeltaExists && !interruptExists {
 				// Delegated agents deliberately do not get agent_delegate again.
 			} else if parseErr != nil {
+				detail.Status = "invalid_arguments"
 				toolResult = "Invalid tool arguments: " + parseErr.Error()
 			} else if mcpExists {
 				value, err := mcpBinding.Client.callTool(ctx, mcpBinding.Tool.Name, arguments)
 				if err != nil {
+					detail.Status = "error"
 					toolResult = "MCP tool failed: " + err.Error()
 				} else {
+					detail.Status = "ok"
 					toolResult = value.Text
 					if value.IsError {
+						detail.Status = "error"
 						toolResult = "MCP tool returned an error: " + toolResult
 					}
 				}
-			} else {
-				value, err := callAdvancedChatConnectorToolExpanded(ctx, user.ID, runID, connectorBinding, arguments)
+			} else if connectorExists {
+				var value string
+				var err error
+				if precreateConnectorTaskErr != nil {
+					err = precreateConnectorTaskErr
+					toolResult = "Failed to create connector task: " + precreateConnectorTaskErr.Error()
+				} else if precreatedConnectorTaskID != "" {
+					value, err = waitAdvancedChatConnectorTask(ctx, precreatedConnectorTaskID, user.ID)
+				} else {
+					value, err = executeAdvancedChatConnectorToolForAgent(ctx, user.ID, options.RunID, connectorBinding, arguments, options.DeltaLog)
+				}
 				if err != nil {
-					toolResult = "Connector tool failed: " + err.Error()
+					detail.Status = "error"
+					if precreateConnectorTaskErr == nil {
+						toolResult = "Connector tool failed: " + err.Error()
+					}
 					if strings.TrimSpace(value) != "" {
 						toolResult = strings.TrimSpace(value) + "\n\n" + toolResult
 					}
 				} else {
+					detail.Status = "ok"
 					toolResult = value
+				}
+			} else if agentSplitExists {
+				splitTools := filterAdvancedChatToolsByName(tools, map[string]bool{
+					advancedChatAgentSplitToolName:             true,
+					advancedChatAgentStudioCommitDeltaToolName: true,
+					advancedChatAgentStudioInterruptToolName:   true,
+				})
+				value, err := executeAdvancedChatAgentSplit(ctx, user, advancedChatAgentSplitInput{
+					RunID:              options.RunID,
+					SessionID:          options.SessionID,
+					ToolCallID:         call.ID,
+					ModelName:          modelName,
+					UserChannelID:      userChannelID,
+					SystemPrompt:       system,
+					Messages:           executorMessages,
+					Tools:              splitTools,
+					MCPBindings:        mcpBindings,
+					ConnectorBindings:  connectorBindings,
+					Observer:           options.Observer,
+					OnApprovalRequired: options.OnApprovalRequired,
+					Arguments:          arguments,
+				})
+				if err != nil {
+					detail.Status = "error"
+					toolResult = "Split agent failed: " + err.Error()
+				} else {
+					detail.Status = "ok"
+					toolResult = value
+				}
+			} else if commitDeltaExists {
+				if len(connectorBindings) == 0 {
+					detail.Status = "error"
+					toolResult = "No connector workspace is available for commit."
+				} else {
+					var commitBinding advancedChatConnectorToolBinding
+					for _, binding := range connectorBindings {
+						commitBinding = binding
+						break
+					}
+					value, err := commitAdvancedChatAgentStudioDelta(ctx, user.ID, options.RunID, commitBinding, arguments)
+					if err != nil {
+						detail.Status = "error"
+						toolResult = "Delta commit failed: " + err.Error()
+						if strings.TrimSpace(value) != "" {
+							toolResult = strings.TrimSpace(value) + "\n\n" + toolResult
+						}
+					} else {
+						detail.Status = "ok"
+						toolResult = value
+					}
+				}
+			} else if interruptExists {
+				value, err := interruptAdvancedChatAgentStudioSubAgents(options.RunID, options.SessionID, user.ID, arguments)
+				if err != nil {
+					detail.Status = "error"
+					toolResult = "Sub-agent interrupt failed: " + err.Error()
+				} else {
+					detail.Status = "ok"
+					toolResult = value
+				}
+			}
+			detail.Result = truncateToolResult(toolResult)
+			if options.Observer.OnToolCall != nil {
+				if err := options.Observer.OnToolCall(detail); err != nil {
+					return strings.TrimSpace(lastContent), err
 				}
 			}
 			executorMessages = append(executorMessages, ChatExecutorMessage{
@@ -725,17 +878,19 @@ func runAdvancedChatDelegatedAgentLoop(ctx context.Context, user *model.User, mo
 }
 
 type advancedChatAgentSplitInput struct {
-	RunID             string
-	SessionID         string
-	ToolCallID        string
-	ModelName         string
-	UserChannelID     uint
-	SystemPrompt      string
-	Messages          []ChatExecutorMessage
-	Tools             []ChatExecutorTool
-	MCPBindings       map[string]mcpToolBinding
-	ConnectorBindings map[string]advancedChatConnectorToolBinding
-	Arguments         map[string]interface{}
+	RunID              string
+	SessionID          string
+	ToolCallID         string
+	ModelName          string
+	UserChannelID      uint
+	SystemPrompt       string
+	Messages           []ChatExecutorMessage
+	Tools              []ChatExecutorTool
+	MCPBindings        map[string]mcpToolBinding
+	ConnectorBindings  map[string]advancedChatConnectorToolBinding
+	Observer           advancedChatCompletionObserver
+	OnApprovalRequired func(context.Context, MessageChannelConnectorApproval) error
+	Arguments          map[string]interface{}
 }
 
 func executeAdvancedChatAgentSplit(ctx context.Context, user *model.User, input advancedChatAgentSplitInput) (string, error) {
@@ -746,7 +901,7 @@ func executeAdvancedChatAgentSplit(ctx context.Context, user *model.User, input 
 	if len(tasks) == 0 {
 		return "", errors.New("tasks are required")
 	}
-	results := make([]map[string]string, len(tasks))
+	results := make([]map[string]interface{}, len(tasks))
 	var wg sync.WaitGroup
 	for index, task := range tasks {
 		wg.Add(1)
@@ -775,17 +930,30 @@ func executeAdvancedChatAgentSplit(ctx context.Context, user *model.User, input 
 			messages = append(messages, ChatExecutorMessage{Role: "user", Content: taskText})
 			system := strings.Join(nonEmptyStrings([]string{
 				input.SystemPrompt,
-				"You are a temporary split worker agent. Work only on the split goal and return a concise result to the caller agent.",
+				"You are a temporary split worker agent. Work only on the split goal and return a concise result to the caller agent. File writes are deferred into your MutationLog and are not physically written to disk.",
 				advancedChatAgentTypeSystemPrompt("worker"),
 			}), "\n\n")
-			result, err := runAdvancedChatDelegatedAgentLoop(ctx, user, input.ModelName, input.UserChannelID, system, messages, input.Tools, input.MCPBindings, input.ConnectorBindings, input.RunID)
+			delta := &advancedChatAgentStudioDeltaLog{}
+			result, err := runAdvancedChatDelegatedAgentLoop(ctx, user, input.ModelName, input.UserChannelID, system, messages, input.Tools, input.MCPBindings, input.ConnectorBindings, advancedChatDelegatedAgentLoopOptions{
+				RunID:              input.RunID,
+				SessionID:          input.SessionID,
+				ParentToolCallID:   input.ToolCallID,
+				Observer:           input.Observer,
+				OnApprovalRequired: input.OnApprovalRequired,
+				AllowSplit:         false,
+				DeltaLog:           delta,
+				StatusAgentID:      label,
+				StatusAgentName:    label,
+				StatusAgentType:    "worker",
+			})
+			mutations := delta.snapshot()
 			if err != nil {
-				appendAdvancedChatAgentTaskEvent(input.RunID, input.SessionID, user.ID, gin.H{"task_id": taskID, "status": "error", "error": err.Error(), "result": truncateToolResult(result)})
-				results[index] = map[string]string{"id": label, "status": "error", "error": err.Error(), "result": strings.TrimSpace(result)}
+				appendAdvancedChatAgentTaskEvent(input.RunID, input.SessionID, user.ID, gin.H{"task_id": taskID, "status": "error", "error": err.Error(), "result": truncateToolResult(result), "mutation_count": len(mutations)})
+				results[index] = map[string]interface{}{"id": label, "status": "error", "error": err.Error(), "result": strings.TrimSpace(result), "mutations": mutations}
 				return
 			}
-			appendAdvancedChatAgentTaskEvent(input.RunID, input.SessionID, user.ID, gin.H{"task_id": taskID, "status": "completed", "result": truncateToolResult(result)})
-			results[index] = map[string]string{"id": label, "status": "completed", "result": strings.TrimSpace(result)}
+			appendAdvancedChatAgentTaskEvent(input.RunID, input.SessionID, user.ID, gin.H{"task_id": taskID, "status": "completed", "result": truncateToolResult(result), "mutation_count": len(mutations)})
+			results[index] = map[string]interface{}{"id": label, "status": "completed", "result": strings.TrimSpace(result), "mutations": mutations}
 		}(index, task)
 	}
 	wg.Wait()
