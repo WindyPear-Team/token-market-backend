@@ -209,6 +209,7 @@ func registerAdvancedChatUserRoutes(group *gin.RouterGroup) {
 	group.GET("/advanced-chat/runs/:id", api.getRun)
 	group.GET("/advanced-chat/runs/:id/events", api.listRunEvents)
 	group.POST("/advanced-chat/runs/:id/stop", api.stopRun)
+	group.GET("/advanced-chat/agent-tasks", api.listAgentTasks)
 	group.GET("/advanced-chat/files", api.listFiles)
 	group.POST("/advanced-chat/files", api.uploadFile)
 	group.GET("/advanced-chat/files/:id/content", api.getFileContent)

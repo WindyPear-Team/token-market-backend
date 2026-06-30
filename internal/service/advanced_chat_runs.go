@@ -154,6 +154,17 @@ type advancedChatRunEventResponse struct {
 	CreatedAt time.Time              `json:"created_at"`
 }
 
+type advancedChatAgentTaskListItem struct {
+	RunID         string                         `json:"run_id"`
+	SessionID     string                         `json:"session_id"`
+	SessionTitle  string                         `json:"session_title"`
+	Status        string                         `json:"status"`
+	StatusMessage string                         `json:"status_message"`
+	StartedAt     *time.Time                     `json:"started_at,omitempty"`
+	UpdatedAt     time.Time                      `json:"updated_at"`
+	Events        []advancedChatRunEventResponse `json:"events"`
+}
+
 type advancedChatSessionInput struct {
 	ID                       string                            `json:"id"`
 	Title                    string                            `json:"title"`
@@ -353,6 +364,76 @@ func (api *advancedChatAPI) listRunEvents(c *gin.Context) {
 	result := make([]advancedChatRunEventResponse, 0, len(events))
 	for _, event := range events {
 		result = append(result, advancedChatRunEventResponseFromModel(event))
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (api *advancedChatAPI) listAgentTasks(c *gin.Context) {
+	user, ok := currentAdvancedChatUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	var runs []AdvancedChatRun
+	if err := model.DB.
+		Where("user_id = ? AND status IN ?", user.ID, []string{advancedChatRunStatusQueued, advancedChatRunStatusRunning}).
+		Order("updated_at DESC").
+		Limit(50).
+		Find(&runs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load agent tasks"})
+		return
+	}
+	if len(runs) == 0 {
+		c.JSON(http.StatusOK, []advancedChatAgentTaskListItem{})
+		return
+	}
+	runIDs := make([]string, 0, len(runs))
+	sessionIDs := make([]string, 0, len(runs))
+	for _, run := range runs {
+		runIDs = append(runIDs, run.ID)
+		sessionIDs = append(sessionIDs, run.SessionID)
+	}
+	var sessions []AdvancedChatSession
+	if err := model.DB.
+		Select("id", "title").
+		Where("user_id = ? AND id IN ?", user.ID, sessionIDs).
+		Find(&sessions).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load agent task sessions"})
+		return
+	}
+	sessionTitles := map[string]string{}
+	for _, session := range sessions {
+		sessionTitles[session.ID] = session.Title
+	}
+	var events []AdvancedChatRunEvent
+	if err := model.DB.
+		Where("user_id = ? AND run_id IN ? AND event = ?", user.ID, runIDs, "agent_task").
+		Order("run_id ASC, seq ASC").
+		Limit(1000).
+		Find(&events).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load agent task events"})
+		return
+	}
+	eventsByRun := map[string][]advancedChatRunEventResponse{}
+	for _, event := range events {
+		eventsByRun[event.RunID] = append(eventsByRun[event.RunID], advancedChatRunEventResponseFromModel(event))
+	}
+	result := make([]advancedChatAgentTaskListItem, 0, len(runs))
+	for _, run := range runs {
+		runEvents := eventsByRun[run.ID]
+		if runEvents == nil {
+			runEvents = []advancedChatRunEventResponse{}
+		}
+		result = append(result, advancedChatAgentTaskListItem{
+			RunID:         run.ID,
+			SessionID:     run.SessionID,
+			SessionTitle:  sessionTitles[run.SessionID],
+			Status:        run.Status,
+			StatusMessage: run.StatusMessage,
+			StartedAt:     run.StartedAt,
+			UpdatedAt:     run.UpdatedAt,
+			Events:        runEvents,
+		})
 	}
 	c.JSON(http.StatusOK, result)
 }
@@ -928,6 +1009,7 @@ func runAdvancedChatAssistantCompletion(runID string, userID uint, prepared prep
 	if err := model.DB.Where("id = ? AND user_id = ?", runID, userID).First(&run).Error; err != nil {
 		return
 	}
+	prepared.input.SessionID = run.SessionID
 	now := time.Now()
 	startUpdate := model.DB.Model(&run).
 		Where("status = ?", advancedChatRunStatusQueued).
@@ -1012,13 +1094,15 @@ func executePreparedAdvancedChatCompletion(ctx context.Context, user *model.User
 		}
 	}
 	tools := []ChatExecutorTool{}
+	mcpTools := []ChatExecutorTool{}
 	bindings := map[string]mcpToolBinding{}
 	if advancedChatAssistantMCPToolsEnabled() {
 		var err error
-		tools, bindings, err = listAdvancedChatMCPTools(ctx, prepared.servers)
+		mcpTools, bindings, err = listAdvancedChatMCPTools(ctx, prepared.servers)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to load MCP tools: %w", err)
 		}
+		tools = append(tools, mcpTools...)
 	}
 	connectorTools, connectorBindings := advancedChatConnectorTools(prepared.connectorDevice, prepared.connectorWorkspace, prepared.connectorAutoApprove, prepared.connectorCommandPrefixes)
 	if len(connectorTools) > 0 {
@@ -1027,6 +1111,7 @@ func executePreparedAdvancedChatCompletion(ctx context.Context, user *model.User
 	if len(prepared.agentGroups) > 0 {
 		tools = append(tools, advancedChatAgentDelegateTool(prepared.agentGroups))
 	}
+	tools = append(tools, advancedChatAgentSplitTool())
 	deliveryToolName := ""
 	if prepared.delivery != nil {
 		deliveryToolName = "deliver_result"
@@ -1038,6 +1123,13 @@ func executePreparedAdvancedChatCompletion(ctx context.Context, user *model.User
 			systemPrompt = agentGroupPrompt
 		} else {
 			systemPrompt = strings.Join([]string{systemPrompt, agentGroupPrompt}, "\n\n")
+		}
+	}
+	if splitPrompt := advancedChatAgentSplitSystemPrompt(); splitPrompt != "" {
+		if strings.TrimSpace(systemPrompt) == "" {
+			systemPrompt = splitPrompt
+		} else {
+			systemPrompt = strings.Join([]string{systemPrompt, splitPrompt}, "\n\n")
 		}
 	}
 	if connectorPrompt := advancedChatConnectorSystemPrompt(prepared.connectorDevice, prepared.connectorWorkspace); connectorPrompt != "" {
@@ -1128,6 +1220,7 @@ func executePreparedAdvancedChatCompletion(ctx context.Context, user *model.User
 			connectorBinding, connectorExists := connectorBindings[toolCall.Name]
 			deliveryExists := prepared.delivery != nil && toolCall.Name == deliveryToolName
 			agentDelegateExists := toolCall.Name == advancedChatAgentDelegateToolName && len(prepared.agentGroups) > 0
+			agentSplitExists := toolCall.Name == advancedChatAgentSplitToolName
 			detail := advancedChatCompletionToolCall{ID: toolCall.ID, Round: round + 1, Name: toolCall.Name, Status: "running"}
 			precreatedConnectorTaskID := ""
 			var precreateConnectorTaskErr error
@@ -1143,6 +1236,9 @@ func executePreparedAdvancedChatCompletion(ctx context.Context, user *model.User
 			} else if agentDelegateExists {
 				detail.Server = "agent group"
 				detail.Tool = "agent_delegate"
+			} else if agentSplitExists {
+				detail.Server = "agent split"
+				detail.Tool = "agent_split"
 			}
 			arguments, argumentsErr := parseToolArguments(toolCall.Arguments)
 			if argumentsErr == nil {
@@ -1248,6 +1344,8 @@ func executePreparedAdvancedChatCompletion(ctx context.Context, user *model.User
 					toolResultText, err = executeAdvancedChatAgentDelegate(ctx, user, advancedChatAgentDelegateInput{
 						UserID:             user.ID,
 						RunID:              prepared.runID,
+						SessionID:          prepared.input.SessionID,
+						ToolCallID:         toolCall.ID,
 						ModelName:          prepared.modelName,
 						UserChannelID:      prepared.input.UserChannelID,
 						Messages:           executorMessages,
@@ -1262,6 +1360,35 @@ func executePreparedAdvancedChatCompletion(ctx context.Context, user *model.User
 					if err != nil {
 						detail.Status = "error"
 						toolResultText = "Delegated agent failed: " + err.Error()
+					} else {
+						detail.Status = "ok"
+					}
+				}
+			} else if agentSplitExists {
+				detail.Server = "agent split"
+				detail.Tool = "agent_split"
+				if argumentsErr != nil {
+					detail.Status = "invalid_arguments"
+					toolResultText = "Invalid split arguments: " + argumentsErr.Error()
+				} else {
+					splitTools := append([]ChatExecutorTool{}, mcpTools...)
+					splitTools = append(splitTools, connectorTools...)
+					toolResultText, err = executeAdvancedChatAgentSplit(ctx, user, advancedChatAgentSplitInput{
+						RunID:             prepared.runID,
+						SessionID:         prepared.input.SessionID,
+						ToolCallID:        toolCall.ID,
+						ModelName:         prepared.modelName,
+						UserChannelID:     prepared.input.UserChannelID,
+						SystemPrompt:      systemPrompt,
+						Messages:          executorMessages,
+						Tools:             splitTools,
+						MCPBindings:       bindings,
+						ConnectorBindings: connectorBindings,
+						Arguments:         arguments,
+					})
+					if err != nil {
+						detail.Status = "error"
+						toolResultText = "Split agent failed: " + err.Error()
 					} else {
 						detail.Status = "ok"
 					}
