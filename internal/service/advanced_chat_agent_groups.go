@@ -264,6 +264,15 @@ func normalizeAdvancedChatAgentGroup(input advancedChatAgentGroupInput) (advance
 	if len(agents) == 0 {
 		return advancedChatAgentGroup{}, errors.New("agent group requires at least one agent")
 	}
+	chiefCount := 0
+	for _, agent := range agents {
+		if normalizeAdvancedChatAgentType(agent.Type) == "chief" {
+			chiefCount++
+		}
+	}
+	if chiefCount != 1 {
+		return advancedChatAgentGroup{}, errors.New("agent group must contain exactly one chief")
+	}
 	return advancedChatAgentGroup{
 		ID:          id,
 		Name:        name,
@@ -484,6 +493,19 @@ Use agent_delegate instead when you need a specific existing agent from a connec
 You may call agent_split with several tasks at once. Each split agent returns a result to you; you remain responsible for combining the results and producing the final answer.`)
 }
 
+func advancedChatAgentGroupChatSystemPrompt(group *advancedChatAgentGroup, agent *advancedChatGroupAgent) string {
+	if group == nil || agent == nil {
+		return ""
+	}
+	return strings.TrimSpace("You are participating in an agent group chat.\n" +
+		"Group: " + group.Name + " (" + group.ID + ").\n" +
+		"Your agent identity: " + agent.Name + " (" + agent.ID + "), type: " + normalizeAdvancedChatAgentType(agent.Type) + ".\n" +
+		advancedChatAgentTypeSystemPrompt(agent.Type) + "\n" +
+		"Messages are annotated as coming from the user or from another named agent. Use those annotations to understand who is speaking.\n" +
+		"Reply as this agent only. Start every visible reply with [" + agent.Name + "].\n" +
+		"If the user mentions another agent with @, only respond when you are that addressed agent or when you are the chief routing the work.")
+}
+
 type advancedChatAgentDelegateInput struct {
 	UserID             uint
 	RunID              string
@@ -498,6 +520,7 @@ type advancedChatAgentDelegateInput struct {
 	ConnectorBindings  map[string]advancedChatConnectorToolBinding
 	ConnectorTools     []ChatExecutorTool
 	Groups             []advancedChatAgentGroup
+	CallerAgentName    string
 	Arguments          map[string]interface{}
 }
 
@@ -587,6 +610,9 @@ func executeAdvancedChatAgentDelegate(ctx context.Context, user *model.User, inp
 	}
 	messages := append([]ChatExecutorMessage{}, input.Messages...)
 	taskText := "Delegated goal:\n" + goal
+	if caller := strings.TrimSpace(input.CallerAgentName); caller != "" {
+		taskText = "Message source: agent " + caller + " via CPS delegation.\n\n" + taskText
+	}
 	if extraContext != "" {
 		taskText += "\n\nAdditional context:\n" + extraContext
 	}
@@ -611,8 +637,22 @@ func executeAdvancedChatAgentDelegate(ctx context.Context, user *model.User, inp
 		appendAdvancedChatAgentTaskEvent(input.RunID, input.SessionID, user.ID, gin.H{"task_id": taskID, "status": "error", "error": err.Error(), "result": truncateToolResult(result)})
 		return result, err
 	}
+	result = advancedChatAgentNamePrefix(result, agent.Name)
 	appendAdvancedChatAgentTaskEvent(input.RunID, input.SessionID, user.ID, gin.H{"task_id": taskID, "status": "completed", "result": truncateToolResult(result)})
 	return result, nil
+}
+
+func advancedChatAgentNamePrefix(content string, name string) string {
+	content = strings.TrimSpace(content)
+	name = strings.TrimSpace(name)
+	if content == "" || name == "" {
+		return content
+	}
+	prefix := "[" + name + "]"
+	if strings.HasPrefix(content, prefix) {
+		return content
+	}
+	return prefix + " " + content
 }
 
 func runAdvancedChatDelegatedAgentLoop(ctx context.Context, user *model.User, modelName string, userChannelID uint, system string, messages []ChatExecutorMessage, tools []ChatExecutorTool, mcpBindings map[string]mcpToolBinding, connectorBindings map[string]advancedChatConnectorToolBinding, runID string) (string, error) {

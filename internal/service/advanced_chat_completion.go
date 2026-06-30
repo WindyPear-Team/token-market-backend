@@ -23,6 +23,7 @@ import (
 const (
 	advancedChatModeChat        = "chat"
 	advancedChatModeAssistant   = "assistant"
+	advancedChatModeAgentGroup  = "agent_group"
 	advancedChatMaxToolRounds   = 8
 	assistantMaxToolRounds      = 20
 	assistantModelMaxRetries    = 10
@@ -42,6 +43,7 @@ type advancedChatCompletionInput struct {
 	Messages                 []advancedChatCompletionMessage `json:"messages"`
 	Mode                     string                          `json:"mode"`
 	AgentID                  string                          `json:"agent_id"`
+	AgentGroupID             string                          `json:"agent_group_id"`
 	SkillIDs                 []string                        `json:"skill_ids"`
 	MCPServerIDs             []string                        `json:"mcp_server_ids"`
 	ConnectorDeviceID        string                          `json:"connector_device_id"`
@@ -133,18 +135,18 @@ func (api *advancedChatAPI) completeChat(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	modelName := strings.TrimSpace(input.ModelName)
-	if modelName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Model is required"})
-		return
-	}
 	messages := normalizeAdvancedChatCompletionMessages(input.Messages)
 	if len(messages) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Messages are required"})
 		return
 	}
 	mode := normalizeAdvancedChatCompletionMode(input.Mode)
-	if mode == advancedChatModeAssistant {
+	modelName := strings.TrimSpace(input.ModelName)
+	if modelName == "" && mode != advancedChatModeAgentGroup {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Model is required"})
+		return
+	}
+	if mode == advancedChatModeAssistant || mode == advancedChatModeAgentGroup {
 		if !advancedChatAssistantModeEnabled() {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Assistant mode is disabled"})
 			return
@@ -628,7 +630,7 @@ func buildAdvancedChatCompletionSystemPrompt(agent *AdvancedChatAgent, skills []
 Follow these connector skills when they are relevant to the user's task.
 If a connector skill defines scripts, commands, checks, or other executable steps, run them through the available workspace connector command tool rather than claiming they were run.`))
 	}
-	if mode == advancedChatModeAssistant {
+	if mode == advancedChatModeAssistant || mode == advancedChatModeAgentGroup {
 		sections = append(sections, assistantModeSystemPrompt())
 	}
 	return strings.Join(sections, "\n\n")
@@ -638,20 +640,22 @@ func normalizeAdvancedChatCompletionMode(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case advancedChatModeAssistant:
 		return advancedChatModeAssistant
+	case advancedChatModeAgentGroup:
+		return advancedChatModeAgentGroup
 	default:
 		return advancedChatModeChat
 	}
 }
 
 func advancedChatCompletionMaxToolRounds(mode string) int {
-	if mode == advancedChatModeAssistant {
+	if mode == advancedChatModeAssistant || mode == advancedChatModeAgentGroup {
 		return assistantMaxToolRounds
 	}
 	return advancedChatMaxToolRounds
 }
 
 func advancedChatCompletionTimeout(mode string) time.Duration {
-	if mode == advancedChatModeAssistant {
+	if mode == advancedChatModeAssistant || mode == advancedChatModeAgentGroup {
 		return assistantRequestTimeout
 	}
 	return advancedChatRequestTimeout
