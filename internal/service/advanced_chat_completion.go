@@ -31,6 +31,7 @@ const (
 	assistantModelRetryMaxDelay = 30 * time.Second
 	advancedChatRequestTimeout  = 120 * time.Second
 	assistantRequestTimeout     = 300 * time.Second
+	agentGroupRequestTimeout    = 15 * time.Minute
 )
 
 var toolNameUnsafeChars = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
@@ -662,7 +663,10 @@ func advancedChatCompletionMaxToolRounds(mode string) int {
 }
 
 func advancedChatCompletionTimeout(mode string) time.Duration {
-	if mode == advancedChatModeAssistant || mode == advancedChatModeAgentGroup {
+	if mode == advancedChatModeAgentGroup {
+		return agentGroupRequestTimeout
+	}
+	if mode == advancedChatModeAssistant {
 		return assistantRequestTimeout
 	}
 	return advancedChatRequestTimeout

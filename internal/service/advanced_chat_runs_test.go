@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/WindyPear-Team/flai/internal/model"
 )
 
 func TestAdvancedChatModelRetryDelay(t *testing.T) {
@@ -37,6 +39,24 @@ func TestRetryableAdvancedChatModelRequestError(t *testing.T) {
 	}
 	if retryableAdvancedChatModelRequestError(errors.New("plain error")) {
 		t.Fatal("plain errors should not be retried")
+	}
+}
+
+func TestServerChatExecutorPreservesRoutingStateAcrossCalls(t *testing.T) {
+	previous := serverChatProxyService
+	serverChatProxyService = NewProxyService()
+	defer func() { serverChatProxyService = previous }()
+
+	userChannelID := uint(11)
+	candidates := []model.ModelConfig{
+		{Channel: model.Channel{ID: 1, UserChannelID: &userChannelID, UserChannel: model.UserChannel{RoutingAlgorithm: RoutingRoundRobin}}},
+		{Channel: model.Channel{ID: 2, UserChannelID: &userChannelID, UserChannel: model.UserChannel{RoutingAlgorithm: RoutingRoundRobin}}},
+	}
+
+	first := serverChatExecutor().selectModelConfig(candidates, "gpt-test")
+	second := serverChatExecutor().selectModelConfig(candidates, "gpt-test")
+	if first.Channel.ID != 1 || second.Channel.ID != 2 {
+		t.Fatalf("server chat executor should preserve routing state across calls, got %d then %d", first.Channel.ID, second.Channel.ID)
 	}
 }
 

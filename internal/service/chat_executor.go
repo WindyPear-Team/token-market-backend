@@ -84,14 +84,33 @@ type ChatExecutorResult struct {
 // ChatExecutorError carries an HTTP status so callers can surface upstream and
 // billing failures with the right code.
 type ChatExecutorError struct {
-	Status  int
-	Message string
+	Status            int
+	Message           string
+	ChannelID         uint
+	UserChannelID     uint
+	ModelName         string
+	UpstreamModelName string
+	UpstreamURL       string
 }
 
 func (e *ChatExecutorError) Error() string { return e.Message }
 
 func newChatExecutorError(status int, message string) *ChatExecutorError {
 	return &ChatExecutorError{Status: status, Message: message}
+}
+
+func withChatExecutorChannel(err *ChatExecutorError, channel model.Channel, modelName string, upstreamModelName string, upstreamURL string) *ChatExecutorError {
+	if err == nil {
+		return err
+	}
+	err.ChannelID = channel.ID
+	if channel.UserChannelID != nil {
+		err.UserChannelID = *channel.UserChannelID
+	}
+	err.ModelName = strings.TrimSpace(modelName)
+	err.UpstreamModelName = strings.TrimSpace(upstreamModelName)
+	err.UpstreamURL = strings.TrimSpace(upstreamURL)
+	return err
 }
 
 // ExecuteServerChatCompletion runs one billed chat-completion turn for a user
@@ -154,23 +173,23 @@ func ExecuteServerChatCompletion(c *gin.Context, user *model.User, req ChatExecu
 	resp, err := executor.doUpstreamRequest(prepared, &channel)
 	if err != nil {
 		logUpstreamRequestFailure(c, &channel, prepared.URL, prepared.Body, err)
-		return nil, newChatExecutorError(http.StatusBadGateway, "Upstream request failed")
+		return nil, withChatExecutorChannel(newChatExecutorError(http.StatusBadGateway, "Upstream request failed"), channel, modelName, upstreamModelName, prepared.URL)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= http.StatusBadRequest {
 		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return nil, newChatExecutorError(http.StatusBadGateway, "Failed to read upstream response")
+			return nil, withChatExecutorChannel(newChatExecutorError(http.StatusBadGateway, "Failed to read upstream response"), channel, modelName, upstreamModelName, prepared.URL)
 		}
 		logUpstreamError(c, &channel, prepared.URL, resp.StatusCode, prepared.Body, respBody)
-		return nil, newChatExecutorError(resp.StatusCode, "Upstream request failed")
+		return nil, withChatExecutorChannel(newChatExecutorError(resp.StatusCode, "Upstream request failed"), channel, modelName, upstreamModelName, prepared.URL)
 	}
 
 	if upstreamReq.Stream && isStreamingResponse(resp) {
 		result, usage, usageOK, streamErr := readServerChatStream(resp.Body, protocol, req.OnTextDelta)
 		if streamErr != nil && !billableStreamPartial(result, usageOK) {
-			return nil, newChatExecutorError(http.StatusBadGateway, "Failed to read upstream stream")
+			return nil, withChatExecutorChannel(newChatExecutorError(http.StatusBadGateway, "Failed to read upstream stream"), channel, modelName, upstreamModelName, prepared.URL)
 		}
 		if !usageOK {
 			usage = estimatedServerChatUsage(modelName, req, result.Content)
@@ -190,11 +209,11 @@ func ExecuteServerChatCompletion(c *gin.Context, user *model.User, req ChatExecu
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, newChatExecutorError(http.StatusBadGateway, "Failed to read upstream response")
+		return nil, withChatExecutorChannel(newChatExecutorError(http.StatusBadGateway, "Failed to read upstream response"), channel, modelName, upstreamModelName, prepared.URL)
 	}
 	var responseData map[string]interface{}
 	if err := json.Unmarshal(respBody, &responseData); err != nil {
-		return nil, newChatExecutorError(http.StatusBadGateway, "Failed to parse upstream response")
+		return nil, withChatExecutorChannel(newChatExecutorError(http.StatusBadGateway, "Failed to parse upstream response"), channel, modelName, upstreamModelName, prepared.URL)
 	}
 
 	usage, ok := parseUsageTokens(responseData)
@@ -214,8 +233,10 @@ func ExecuteServerChatCompletion(c *gin.Context, user *model.User, req ChatExecu
 }
 
 func serverChatExecutor() *ProxyService {
-	return NewProxyService()
+	return serverChatProxyService
 }
+
+var serverChatProxyService = NewProxyService()
 
 func serverChatCandidates(modelName string, userChannelID uint) ([]model.ModelConfig, error) {
 	var candidates []model.ModelConfig

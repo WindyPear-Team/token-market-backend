@@ -2125,7 +2125,7 @@ func executeAdvancedChatModelRequestWithRetry(
 			return nil, err
 		}
 		if observer.OnStatus != nil {
-			if err := observer.OnStatus(gin.H{"message": "retrying", "attempt": attempt + 1, "max": assistantModelMaxRetries}); err != nil {
+			if err := observer.OnStatus(advancedChatModelRetryStatusPayload(err, attempt+1)); err != nil {
 				return nil, err
 			}
 		}
@@ -2134,6 +2134,31 @@ func executeAdvancedChatModelRequestWithRetry(
 		}
 	}
 	return nil, lastErr
+}
+
+func advancedChatModelRetryStatusPayload(err error, attempt int) gin.H {
+	payload := gin.H{"message": "retrying", "attempt": attempt, "max": assistantModelMaxRetries}
+	if err == nil {
+		return payload
+	}
+	payload["error"] = err.Error()
+	var executorErr *ChatExecutorError
+	if errors.As(err, &executorErr) {
+		payload["status"] = executorErr.Status
+		if executorErr.ChannelID > 0 {
+			payload["channel_id"] = executorErr.ChannelID
+		}
+		if executorErr.UserChannelID > 0 {
+			payload["user_channel_id"] = executorErr.UserChannelID
+		}
+		if strings.TrimSpace(executorErr.ModelName) != "" {
+			payload["model"] = strings.TrimSpace(executorErr.ModelName)
+		}
+		if strings.TrimSpace(executorErr.UpstreamModelName) != "" {
+			payload["upstream_model"] = strings.TrimSpace(executorErr.UpstreamModelName)
+		}
+	}
+	return payload
 }
 
 func retryableAdvancedChatModelRequestError(err error) bool {

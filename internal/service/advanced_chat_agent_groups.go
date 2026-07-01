@@ -21,6 +21,7 @@ const (
 	advancedChatAgentDelegateToolName = "agent_delegate"
 	advancedChatAgentSplitToolName    = "agent_split"
 	advancedChatDelegatedToolWait     = 45 * time.Second
+	advancedChatDelegatedAgentTimeout = agentGroupRequestTimeout
 )
 
 var advancedChatAgentGroupIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,80}$`)
@@ -621,6 +622,8 @@ func executeAdvancedChatAgentDelegate(ctx context.Context, user *model.User, inp
 		userChannelID = agent.UserChannelID
 	}
 	result, err := withAdvancedChatAgentStudioLock(user.ID, group.ID, agent.ID, func() (string, error) {
+		delegatedCtx, delegatedCancel := newAdvancedChatDelegatedAgentContext(input.RunID, user.ID)
+		defer delegatedCancel()
 		systemParts := []string{
 			"You are running as an employee main agent in Agent Studio. Complete only the delegated goal and return a concise result to the caller agent.",
 			"Agent Studio: " + group.Name + " (" + group.ID + ")",
@@ -651,7 +654,7 @@ func executeAdvancedChatAgentDelegate(ctx context.Context, user *model.User, inp
 		tools := append([]ChatExecutorTool{}, input.ConnectorTools...)
 		mcpBindings := map[string]mcpToolBinding{}
 		if len(servers) > 0 {
-			mcpTools, bindings, err := listAdvancedChatMCPTools(ctx, servers)
+			mcpTools, bindings, err := listAdvancedChatMCPTools(delegatedCtx, servers)
 			if err != nil {
 				return "", fmt.Errorf("failed to load delegated MCP tools: %w", err)
 			}
@@ -664,7 +667,7 @@ func executeAdvancedChatAgentDelegate(ctx context.Context, user *model.User, inp
 		if normalizeAdvancedChatAgentType(agent.Type) == "reviewer" && input.ConnectorDevice != nil {
 			tools = append(tools, advancedChatAgentStudioCommitDeltaTool())
 		}
-		return runAdvancedChatDelegatedAgentLoop(ctx, user, modelName, userChannelID, strings.Join(nonEmptyStrings(systemParts), "\n\n"), messages, tools, mcpBindings, input.ConnectorBindings, advancedChatDelegatedAgentLoopOptions{
+		return runAdvancedChatDelegatedAgentLoop(delegatedCtx, user, modelName, userChannelID, strings.Join(nonEmptyStrings(systemParts), "\n\n"), messages, tools, mcpBindings, input.ConnectorBindings, advancedChatDelegatedAgentLoopOptions{
 			RunID:              input.RunID,
 			SessionID:          input.SessionID,
 			ParentToolCallID:   input.ToolCallID,
@@ -701,11 +704,36 @@ func advancedChatAgentNamePrefix(content string, name string) string {
 	return prefix + " " + content
 }
 
+func newAdvancedChatDelegatedAgentContext(runID string, userID uint) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), advancedChatDelegatedAgentTimeout)
+	runID = strings.TrimSpace(runID)
+	if runID == "" || userID == 0 {
+		return ctx, cancel
+	}
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := ensureAdvancedChatRunNotCancelled(runID, userID); err != nil {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return ctx, cancel
+}
+
 func runAdvancedChatDelegatedAgentLoop(ctx context.Context, user *model.User, modelName string, userChannelID uint, system string, messages []ChatExecutorMessage, tools []ChatExecutorTool, mcpBindings map[string]mcpToolBinding, connectorBindings map[string]advancedChatConnectorToolBinding, options advancedChatDelegatedAgentLoopOptions) (string, error) {
 	executorMessages := append([]ChatExecutorMessage{}, messages...)
 	lastContent := ""
 	lastToolResult := ""
 	lastToolStatus := ""
+	observer := advancedChatDelegatedModelObserver(options, user.ID)
 	for round := 0; round < 6; round++ {
 		result, err := executeAdvancedChatModelRequestWithRetry(ctx, user, ChatExecutorRequest{
 			Context:       ctx,
@@ -715,7 +743,11 @@ func runAdvancedChatDelegatedAgentLoop(ctx context.Context, user *model.User, mo
 			System:        system,
 			Tools:         tools,
 			MaxTokens:     0,
-		}, advancedChatCompletionObserver{}, func() bool { return true })
+			Stream:        true,
+			OnTextDelta: func(delta string) error {
+				return nil
+			},
+		}, observer, func() bool { return true })
 		if err != nil {
 			return strings.TrimSpace(lastContent), err
 		}
@@ -924,6 +956,65 @@ func runAdvancedChatDelegatedAgentLoop(ctx context.Context, user *model.User, mo
 		return "Completed delegated work. Last tool result:\n" + truncateToolResult(lastToolResult), nil
 	}
 	return "", errors.New("delegated agent reached the tool round limit without a final result")
+}
+
+func advancedChatDelegatedModelObserver(options advancedChatDelegatedAgentLoopOptions, userID uint) advancedChatCompletionObserver {
+	return advancedChatCompletionObserver{
+		OnStatus: func(payload gin.H) error {
+			message := strings.TrimSpace(stringFromMap(payload, "message"))
+			if message == "retrying" {
+				attempt := intFromStatusPayload(payload, "attempt")
+				maxAttempts := intFromStatusPayload(payload, "max")
+				status := intFromStatusPayload(payload, "status")
+				channelID := intFromStatusPayload(payload, "channel_id")
+				errorText := strings.TrimSpace(stringFromMap(payload, "error"))
+				parts := []string{}
+				if attempt > 0 && maxAttempts > 0 {
+					parts = append(parts, fmt.Sprintf("retrying:%d/%d", attempt, maxAttempts))
+				} else {
+					parts = append(parts, "retrying")
+				}
+				if status > 0 {
+					parts = append(parts, fmt.Sprintf("status=%d", status))
+				}
+				if channelID > 0 {
+					parts = append(parts, fmt.Sprintf("channel=%d", channelID))
+				}
+				if errorText != "" {
+					parts = append(parts, errorText)
+				}
+				appendAdvancedChatAgentMessageEvent(options, userID, "system", strings.Join(parts, " "), "", "running")
+			}
+			if options.Observer.OnStatus != nil {
+				return options.Observer.OnStatus(payload)
+			}
+			return nil
+		},
+	}
+}
+
+func intFromStatusPayload(payload gin.H, key string) int {
+	value, exists := payload[key]
+	if !exists {
+		return 0
+	}
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case uint:
+		return int(typed)
+	case uint64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case json.Number:
+		result, _ := typed.Int64()
+		return int(result)
+	default:
+		return 0
+	}
 }
 
 func advancedChatDelegatedDisplayRound(options advancedChatDelegatedAgentLoopOptions, fallback int) int {
